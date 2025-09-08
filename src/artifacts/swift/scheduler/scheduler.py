@@ -34,7 +34,7 @@ class SchedulerArtifact(Artifact):
         self.waiting_q = deque()
         self.running_q: list[SwiftRequest] = []
         self.swapped_q = deque()
-
+        
         self.num_gpu_blocks = args.num_gpu_blocks
         self.num_decoding_gpu_blocks = 0
         self.num_free_cpu_blocks = args.num_cpu_blocks
@@ -51,7 +51,6 @@ class SchedulerArtifact(Artifact):
             self._register_method(method, service)
         
         
-
     def _get_block_needed(self, request: SwiftRequest) -> int:
         return cdiv(
             request.prompt_len + request.get_cur_output_len(), self.args.block_size
