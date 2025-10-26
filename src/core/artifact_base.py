@@ -15,7 +15,6 @@ from pathlib import Path
 import importlib.util
 import inspect
 import uuid
-from src.core.service_base import BaseService
 
 @dataclass
 class ExecutionContext:
@@ -43,14 +42,31 @@ class Artifact(ABC):
     #     """
     
     def __init__(self):
-        self.registered_methods = []
-        self.registered_objs = []
+        super().__init__()
+        self.registered_methods_to = {}
+        self.registered_objs_to = {}
     
-    def _register_method(self, obj_name: str, service: BaseService, artifact_name: str = None):
+    @property
+    def path(self):
+        pass
+    
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        pass
+    
+    def _register_method(self, obj_name: str, service):
         if not hasattr(self, obj_name):
             raise ValueError("No such method in the artifact to register.")
         
-        self.registered_methods.append(obj_name)
+        if obj_name not in self.registered_methods_to.keys():
+            self.registered_methods_to[obj_name] = []
+        self.registered_methods_to[obj_name].append(service.name)
+        
+        if self.name not in service.registered_methods_by.keys():
+            service.registered_methods_by[self.name] = []
+        
+        service.registered_methods_by[self.name].append(obj_name)
         
         original_method = getattr(self.__class__, obj_name)
         
@@ -58,29 +74,34 @@ class Artifact(ABC):
         self_service = service
         
         # Create a wrapper that replaces self references with artifact references
-        def create_method_wrapper(original_func, artifact_name):
+        def create_method_wrapper(original_func):
             
             def method_wrapper(dummy_self, *args, **kwargs):
                 # Create a proxy object that routes attribute access
                 class ArtifactProxy:
-                    def __init__(self, artifact_name):
-                        self._artifact_name = artifact_name
+                    def __init__(self):
+                        self._artifact_name = self_artifact.name
                     
                     def __getattr__(self, name):
                         # First check if it's a registered method in the service
-                        if name in self_artifact.registered_methods or name in self_artifact.registered_objs:
+                        if name in self_artifact.registered_methods_to.keys() or name in self_artifact.registered_objs_to.keys():
                             # print(f"[Proxy] Accessing registered attribute '{name}': {hasattr(self_service, name)}")
                             if hasattr(self_service, name):
                                 return getattr(self_service, name)
-
+                            
                             # print(name, hasattr(self_artifact, name))
                             # Then check if it's available in the artifact instance
                             raise AttributeError(f"'{type(self_service).__name__}' object has no attribute '{name}'")
                         else:
-                            return getattr(self_artifact, name)
+                            if hasattr(self_service, name):
+                                return getattr(self_service, name)
+                            elif hasattr(self_artifact, name):
+                                return getattr(self_artifact, name)
+                            else:
+                                raise AttributeError(f"'Neither {type(self_service).__name__}' or {type(self_artifact).__name__} object has attribute '{name}'")
                     
                     def __setattr__(self, name, value):
-                        if name in self_artifact.registered_methods or name in self_artifact.registered_objs:
+                        if name in self_artifact.registered_methods_to.keys() or name in self_artifact.registered_objs_to.keys():
                             if hasattr(self_service, name):
                                 setattr(self_service, name, value)
                                 return
@@ -90,7 +111,7 @@ class Artifact(ABC):
                             setattr(self_artifact, name, value)
                 
                 # Create the proxy and call the original method
-                proxy = ArtifactProxy(artifact_name)
+                proxy = ArtifactProxy()
 
                 # Call the original method with the proxy as self
                 return original_func(proxy, *args, **kwargs)
@@ -98,17 +119,21 @@ class Artifact(ABC):
             return method_wrapper
         
         # Create the wrapped method
-        wrapped_method = create_method_wrapper(original_method, artifact_name)
+        wrapped_method = create_method_wrapper(original_method)
         
         # Bind it to the service
         import types
         setattr(service, obj_name, types.MethodType(wrapped_method, service))
     
-    def _register_obj(self, obj_name: str, service: BaseService, artifact_name: str = None):
+    def _register_obj(self, obj_name: str, service):
         if not hasattr(self, obj_name):
             raise ValueError("No such object in the artifact to register.")
-        
-        self.registered_objs.append(obj_name)
+        if obj_name not in self.registered_objs_to.keys():
+            self.registered_objs_to[obj_name] = []
+        self.registered_objs_to[obj_name].append(service.name)
+        if self.name not in service.registered_objs_by.keys():
+            service.registered_objs_by[self.name] = []
+        service.registered_objs_by[self.name].append(obj_name)
         
         setattr(service, obj_name, getattr(self, obj_name))
         

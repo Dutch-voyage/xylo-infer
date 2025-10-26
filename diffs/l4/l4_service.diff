@@ -1,0 +1,527 @@
+diff --git a/src/services/nanovllm_v2/__pycache__/__init__.cpython-312.pyc b/src/services/nanovllm_v3/__pycache__/__init__.cpython-312.pyc
+index 51c0897..5b66455 100644
+Binary files a/src/services/nanovllm_v2/__pycache__/__init__.cpython-312.pyc and b/src/services/nanovllm_v3/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/__pycache__/config.cpython-312.pyc b/src/services/nanovllm_v3/__pycache__/config.cpython-312.pyc
+index 5aa00c2..0f86f6d 100644
+Binary files a/src/services/nanovllm_v2/__pycache__/config.cpython-312.pyc and b/src/services/nanovllm_v3/__pycache__/config.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/__pycache__/llm.cpython-312.pyc b/src/services/nanovllm_v3/__pycache__/llm.cpython-312.pyc
+index fb3aa66..44a1146 100644
+Binary files a/src/services/nanovllm_v2/__pycache__/llm.cpython-312.pyc and b/src/services/nanovllm_v3/__pycache__/llm.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/__pycache__/sampling_params.cpython-312.pyc b/src/services/nanovllm_v3/__pycache__/sampling_params.cpython-312.pyc
+index f84ab25..0683b5c 100644
+Binary files a/src/services/nanovllm_v2/__pycache__/sampling_params.cpython-312.pyc and b/src/services/nanovllm_v3/__pycache__/sampling_params.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/config.py b/src/services/nanovllm_v3/config.py
+index 6560f49..443dbbc 100644
+--- a/src/services/nanovllm_v2/config.py
++++ b/src/services/nanovllm_v3/config.py
+@@ -6,10 +6,10 @@ from transformers import AutoConfig
+ @dataclass
+ class Config:
+     model: str
+-    max_num_batched_tokens: int = 16384
++    max_num_batched_tokens: int = 262144
+     max_num_seqs: int = 512
+-    max_model_len: int = 4096
+-    gpu_memory_utilization: float = 0.9
++    max_model_len: int = 32768
++    gpu_memory_utilization: float = 0.7
+     tensor_parallel_size: int = 1
+     enforce_eager: bool = False
+     hf_config: AutoConfig | None = None
+diff --git a/src/services/nanovllm_v2/engine/__pycache__/block_manager.cpython-312.pyc b/src/services/nanovllm_v3/engine/__pycache__/block_manager.cpython-312.pyc
+index 3814e03..862d445 100644
+Binary files a/src/services/nanovllm_v2/engine/__pycache__/block_manager.cpython-312.pyc and b/src/services/nanovllm_v3/engine/__pycache__/block_manager.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v3/engine/__pycache__/io_struct.cpython-312.pyc b/src/services/nanovllm_v3/engine/__pycache__/io_struct.cpython-312.pyc
+new file mode 100644
+index 0000000..50d6f26
+Binary files /dev/null and b/src/services/nanovllm_v3/engine/__pycache__/io_struct.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/engine/__pycache__/llm_engine.cpython-312.pyc b/src/services/nanovllm_v3/engine/__pycache__/llm_engine.cpython-312.pyc
+index 2dd830b..f767463 100644
+Binary files a/src/services/nanovllm_v2/engine/__pycache__/llm_engine.cpython-312.pyc and b/src/services/nanovllm_v3/engine/__pycache__/llm_engine.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/engine/__pycache__/scheduler.cpython-312.pyc b/src/services/nanovllm_v3/engine/__pycache__/scheduler.cpython-312.pyc
+index d65e9da..d2748d0 100644
+Binary files a/src/services/nanovllm_v2/engine/__pycache__/scheduler.cpython-312.pyc and b/src/services/nanovllm_v3/engine/__pycache__/scheduler.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/engine/__pycache__/sequence.cpython-312.pyc b/src/services/nanovllm_v3/engine/__pycache__/sequence.cpython-312.pyc
+index 2ee3b64..a5488ac 100644
+Binary files a/src/services/nanovllm_v2/engine/__pycache__/sequence.cpython-312.pyc and b/src/services/nanovllm_v3/engine/__pycache__/sequence.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v3/engine/io_struct.py b/src/services/nanovllm_v3/engine/io_struct.py
+new file mode 100644
+index 0000000..c5ff085
+--- /dev/null
++++ b/src/services/nanovllm_v3/engine/io_struct.py
+@@ -0,0 +1,42 @@
++import dataclasses
++import torch
++from typing import Iterable
++from .sequence import Sequence
++from ..utils.context import get_context
++
++
++@dataclasses.dataclass
++class SamplingInfo:
++    temperatures: torch.Tensor
++    top_ks: torch.Tensor
++    top_ps: torch.Tensor
++    min_ps: torch.Tensor
++
++    @property
++    def is_greedy_sampling(self):
++        return torch.any(self.temperatures < 0)
++    
++    @property
++    def need_min_p_sampling(self):
++        return torch.any(self.min_ps > 0)
++
++    @property
++    def need_top_k_sampling(self):
++        return torch.any(self.top_ks > 0)
++
++    @classmethod
++    def from_sequence(cls, seqs: list[Sequence]):
++        temperatures = torch.tensor(
++            [seq.temperature for seq in seqs], dtype=torch.float
++        )
++        top_ks = torch.tensor([seq.top_k for seq in seqs], dtype=torch.int)
++        top_ps = torch.tensor([seq.top_p for seq in seqs], dtype=torch.float)
++        min_ps = torch.tensor([seq.min_p for seq in seqs], dtype=torch.float)
++        return cls(temperatures, top_ks, top_ps, min_ps)
++
++    def to(self, device):
++        self.temperatures = self.temperatures.to(device)
++        self.top_ks = self.top_ks.to(device)
++        self.top_ps = self.top_ps.to(device)
++        self.min_ps = self.min_ps.to(device)
++        return self
+diff --git a/src/services/nanovllm_v2/engine/llm_engine.py b/src/services/nanovllm_v3/engine/llm_engine.py
+index df40fae..164753b 100644
+--- a/src/services/nanovllm_v2/engine/llm_engine.py
++++ b/src/services/nanovllm_v3/engine/llm_engine.py
+@@ -9,7 +9,7 @@ from ..config import Config
+ from ..sampling_params import SamplingParams
+ from .sequence import Sequence
+ from .scheduler import Scheduler
+-from src.services.nanovllm_v2.model_runner import ModelRunner
++from src.services.nanovllm_v3.model_runner import ModelRunner
+ 
+ 
+ class LLMEngine:
+diff --git a/src/services/nanovllm_v2/engine/sequence.py b/src/services/nanovllm_v3/engine/sequence.py
+index 208da42..f753b75 100644
+--- a/src/services/nanovllm_v2/engine/sequence.py
++++ b/src/services/nanovllm_v3/engine/sequence.py
+@@ -14,6 +14,7 @@ class SequenceStatus(Enum):
+ class Sequence:
+     block_size = 1
+     counter = count()
++    cuda_graph_counter = count()
+     
+     def __init__(self):
+         self.block_table: list[int] = []
+@@ -24,6 +25,7 @@ class Sequence:
+     @classmethod
+     def for_capture(cls, block_table: list[int]):
+         seq = cls()
++        seq.seq_id = next(Sequence.cuda_graph_counter)
+         seq.block_table = block_table
+         seq.num_tokens = len(block_table) * cls.block_size
+         return seq
+@@ -39,10 +41,15 @@ class Sequence:
+         seq.num_tokens = len(seq.token_ids)
+         seq.num_prompt_tokens = len(token_ids)
+         seq.num_cached_tokens = 0
++        
+         seq.block_table = []
+         seq.temperature = sampling_params.temperature
++        seq.top_k = sampling_params.top_k
++        seq.top_p = sampling_params.top_p
++        seq.min_p = sampling_params.min_p
+         seq.max_tokens = sampling_params.max_tokens
+         seq.ignore_eos = sampling_params.ignore_eos
++        
+         return seq
+ 
+     def __len__(self):
+diff --git a/src/services/nanovllm_v2/model_runner/__pycache__/__init__.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/__pycache__/__init__.cpython-312.pyc
+index 8be9962..9ebe56b 100644
+Binary files a/src/services/nanovllm_v2/model_runner/__pycache__/__init__.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/__pycache__/__init__.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/__pycache__/model_runner.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/__pycache__/model_runner.cpython-312.pyc
+index e4e67c6..0747eff 100644
+Binary files a/src/services/nanovllm_v2/model_runner/__pycache__/model_runner.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/__pycache__/model_runner.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/layers/__pycache__/activation.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/layers/__pycache__/activation.cpython-312.pyc
+index 290891a..e521f85 100644
+Binary files a/src/services/nanovllm_v2/model_runner/layers/__pycache__/activation.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/layers/__pycache__/activation.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/layers/__pycache__/embed_head.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/layers/__pycache__/embed_head.cpython-312.pyc
+index 815b8d7..e9555a7 100644
+Binary files a/src/services/nanovllm_v2/model_runner/layers/__pycache__/embed_head.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/layers/__pycache__/embed_head.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/layers/__pycache__/layernorm.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/layers/__pycache__/layernorm.cpython-312.pyc
+index 2b81fec..83e4ec7 100644
+Binary files a/src/services/nanovllm_v2/model_runner/layers/__pycache__/layernorm.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/layers/__pycache__/layernorm.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/layers/__pycache__/linear.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/layers/__pycache__/linear.cpython-312.pyc
+index 7b434aa..493799e 100644
+Binary files a/src/services/nanovllm_v2/model_runner/layers/__pycache__/linear.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/layers/__pycache__/linear.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/layers/__pycache__/rotary_embedding.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/layers/__pycache__/rotary_embedding.cpython-312.pyc
+index ad7e883..f580984 100644
+Binary files a/src/services/nanovllm_v2/model_runner/layers/__pycache__/rotary_embedding.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/layers/__pycache__/rotary_embedding.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/layers/__pycache__/sampler.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/layers/__pycache__/sampler.cpython-312.pyc
+index b36abf4..f805fea 100644
+Binary files a/src/services/nanovllm_v2/model_runner/layers/__pycache__/sampler.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/layers/__pycache__/sampler.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/layers/sampler.py b/src/services/nanovllm_v3/model_runner/layers/sampler.py
+index e4b9816..23f4b8d 100644
+--- a/src/services/nanovllm_v2/model_runner/layers/sampler.py
++++ b/src/services/nanovllm_v3/model_runner/layers/sampler.py
+@@ -1,18 +1,46 @@
+ import torch
+ from torch import nn
+ 
++from sgl_kernel import (
++    min_p_sampling_from_probs,
++    top_k_renorm_prob,
++    top_k_top_p_sampling_from_probs,
++    top_p_renorm_prob,
++)
++
++from ...engine.io_struct import SamplingInfo
+ 
+ class Sampler(nn.Module):
+ 
+     def __init__(self):
+         super().__init__()
+ 
+-    def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
+-        logits = logits.to(torch.float)
+-        greedy_tokens = logits.argmax(dim=-1)
+-        logits.div_(temperatures.unsqueeze(dim=1))
+-        probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+-        # logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+-        epsilon = 1e-10  
+-        sample_tokens = probs.div_(torch.empty_like(probs).exponential_(1) + epsilon).argmax(dim=-1)  
+-        return torch.where(temperatures == 0, greedy_tokens, sample_tokens)
++    # def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
++    #     logits = logits.to(torch.float)
++    #     greedy_tokens = logits.argmax(dim=-1)
++    #     logits.div_(temperatures.unsqueeze(dim=1))
++    #     probs = torch.softmax(logits, dim=-1, dtype=torch.float)
++    #     # logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
++    #     epsilon = 1e-10  
++    #     sample_tokens = probs.div_(torch.empty_like(probs).exponential_(1) + epsilon).argmax(dim=-1)  
++    #     return torch.where(temperatures == 0, greedy_tokens, sample_tokens)
++    
++    def forward(self, logits: torch.Tensor, sampling_infos: SamplingInfo):
++        if sampling_infos.is_greedy_sampling:
++            return logits.argmax(dim=-1)
++        logits = logits.float().div_(sampling_infos.temperatures[:, None])
++        probs = torch.softmax(logits, dim=-1)
++        del logits
++        
++        if sampling_infos.need_min_p_sampling:
++            probs = top_k_renorm_prob(probs, sampling_infos.top_ks)
++            probs = top_p_renorm_prob(probs, sampling_infos.top_ps)
++            sample_tokens = min_p_sampling_from_probs(probs, sampling_infos.min_ps)
++        else:
++            sample_tokens = top_k_top_p_sampling_from_probs(
++                probs.contiguous(), 
++                sampling_infos.top_ks,
++                sampling_infos.top_ps, 
++                filter_apply_order="joint", 
++            )        
++        return sample_tokens
+\ No newline at end of file
+diff --git a/src/services/nanovllm_v2/model_runner/model_runner.py b/src/services/nanovllm_v3/model_runner/model_runner.py
+index 19bf464..ec42959 100644
+--- a/src/services/nanovllm_v2/model_runner/model_runner.py
++++ b/src/services/nanovllm_v3/model_runner/model_runner.py
+@@ -13,6 +13,9 @@ from ..utils.loader import load_model
+ 
+ from src.core.service_base import BaseService
+ import itertools
++from ..engine.io_struct import SamplingInfo
++
++from src.services.nanovllm_v3.utils.context import set_cuda_graph_flag
+ 
+ from enum import Enum
+ 
+@@ -20,6 +23,8 @@ class RunningStage(Enum):
+     WARMUP = 1
+     INFERENCE = 2
+ 
++stage = RunningStage.WARMUP
++
+ class ModelRunner(BaseService):
+     @property
+     def name(self):
+@@ -41,21 +46,28 @@ class ModelRunner(BaseService):
+         default_dtype = torch.get_default_dtype()
+         torch.set_default_dtype(hf_config.torch_dtype)
+         torch.set_default_device("cuda")
+-        from src.services.nanovllm_v2.model_runner.models.qwen3 import Qwen3AttentionArtifacts
++        from src.services.nanovllm_v3.model_runner.models.qwen3 import Qwen3AttentionArtifacts
+         self.attention_backend = Qwen3AttentionArtifacts.init_new(self, hf_config)
+         self.attention_backend.register(self)
+         self.model = Qwen3ForCausalLM(self.attention_backend, hf_config)
+         load_model(self.model, config.model)
++        
++        self.model.model.cache_mngr._register_method("init_block_table_after_prefill", self)
++        self.model.model.cache_mngr._register_method("prepare_indices_flashinfer", self)
++        self.model.model.cache_mngr._register_method("update_indices_per_layer_capture", self)
++        self.model.model.cache_mngr._register_method("update_indices_per_layer_replay", self)
++
++        
+         self.sampler = Sampler()
+-        self.stage = RunningStage.WARMUP
+-        self.warmup_model()
+-        print("after warmup")
+-        self.stage = RunningStage.INFERENCE
++        global stage
++        stage = RunningStage.WARMUP
++        # self.warmup_model()
++        stage = RunningStage.INFERENCE
+         
+         self.allocate_kv_cache()
+         if not self.enforce_eager:
++            set_cuda_graph_flag()
+             self.capture_cudagraph()
+-        print("after capturing cuda graph")
+         torch.set_default_device("cpu")
+         torch.set_default_dtype(default_dtype)
+ 
+@@ -199,30 +211,24 @@ class ModelRunner(BaseService):
+         block_tables = self.prepare_block_tables(seqs)
+         set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+         
+-        if not self.enforce_eager and self.stage != RunningStage.WARMUP:
++        if not self.enforce_eager and stage != RunningStage.WARMUP:
+             # cuda_graph enabled
+-            bs = len(seqs)
+-            seq_lens = torch.tensor(
+-                [len(seq.block_table) for seq in seqs], device="cuda"
+-            )
+-            cu_page_indices = torch.tensor(
+-                list(itertools.chain(*[seq.block_table for seq in seqs])), device="cuda"
+-            ).to(torch.int32)
+-            self.init_forward_metadata_replay_cuda_graph(
+-                bs,
+-                seq_lens, 
+-                cu_page_indices, 
+-            )
++            self.init_block_table_after_prefill(seqs)
++            self.prepare_indices_flashinfer()
++            self.update_indices_per_layer_replay(bs=len(seqs))
+         else:
+             self.prepare_metadata_for_attn(seqs)
+         return input_ids, positions
+ 
++    # def prepare_sample(self, seqs: list[Sequence]):
++    #     temperatures = []
++    #     for seq in seqs:
++    #         temperatures.append(seq.temperature)
++    #     temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
++    #     return temperatures
++
+     def prepare_sample(self, seqs: list[Sequence]):
+-        temperatures = []
+-        for seq in seqs:
+-            temperatures.append(seq.temperature)
+-        temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+-        return temperatures
++        return SamplingInfo.from_sequence(seqs)
+ 
+     @torch.inference_mode()
+     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+@@ -246,10 +252,11 @@ class ModelRunner(BaseService):
+ 
+     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
++        # temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
++        sampling_infos = self.prepare_sample(seqs).to(input_ids.device) if self.rank == 0 else None
+         
+         logits = self.run_model(input_ids, positions, is_prefill)
+-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
++        token_ids = self.sampler(logits, sampling_infos).tolist() if self.rank == 0 else None
+         reset_context()
+         return token_ids
+ 
+@@ -266,12 +273,9 @@ class ModelRunner(BaseService):
+         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
+         
+         seqs = [Sequence.for_capture([0]) for _ in range(max_bs)]
+-        cu_page_indices = torch.tensor(
+-            list(itertools.chain(*[seq.block_table for seq in seqs])), device="cuda"
+-        ).to(torch.int32)
+-        seq_lens = torch.tensor(
+-            [len(seq.block_table) for seq in seqs], device="cuda"
+-        )
++        self.init_block_table_after_prefill(seqs)
++        self.prepare_indices_flashinfer()
++        
+         
+         outputs = torch.zeros(max_bs, hf_config.hidden_size)
+         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+@@ -281,7 +285,8 @@ class ModelRunner(BaseService):
+         for bs in reversed(self.graph_bs):
+             graph = torch.cuda.CUDAGraph()
+             set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
+-            self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
++            # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
++            self.update_indices_per_layer_capture(bs)
+             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+             with torch.cuda.graph(graph, self.graph_pool):
+                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
+diff --git a/src/services/nanovllm_v2/model_runner/models/__pycache__/qwen3.cpython-312.pyc b/src/services/nanovllm_v3/model_runner/models/__pycache__/qwen3.cpython-312.pyc
+index 180a639..7703b84 100644
+Binary files a/src/services/nanovllm_v2/model_runner/models/__pycache__/qwen3.cpython-312.pyc and b/src/services/nanovllm_v3/model_runner/models/__pycache__/qwen3.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/model_runner/models/qwen3.py b/src/services/nanovllm_v3/model_runner/models/qwen3.py
+index 3105d0f..cde4d8f 100755
+--- a/src/services/nanovllm_v2/model_runner/models/qwen3.py
++++ b/src/services/nanovllm_v3/model_runner/models/qwen3.py
+@@ -12,12 +12,15 @@ from ..layers.linear import (
+ )
+ from ..layers.rotary_embedding import get_rope
+ from ..layers.embed_head import VocabParallelEmbedding, ParallelLMHead
+-from src.services.nanovllm_v2.engine.sequence import Sequence
++from src.services.nanovllm_v3.engine.sequence import Sequence
++from src.artifacts.nanovllm_v3.cache_mngr.layerwise import CacheManager
+ 
+ from src.core.service_base import BaseService
+ from src.core.artifact_base import Artifact
+ import dataclasses
+ 
++from src.services.nanovllm_v3.utils.context import get_cuda_graph_flag
++
+ 
+ @dataclasses.dataclass
+ class Qwen3AttentionArtifacts:
+@@ -29,7 +32,7 @@ class Qwen3AttentionArtifacts:
+         model_runner, 
+         config
+     ):
+-        from src.artifacts.nanovllm_v2.attention.flashinfer_attention import Attention
++        from src.artifacts.nanovllm_v3.attention.flashinfer_attention import Attention
+         tp_size = dist.get_world_size()
+         num_heads = config.num_attention_heads // tp_size
+         num_kv_heads = config.num_key_value_heads // tp_size
+@@ -48,22 +51,26 @@ class Qwen3AttentionArtifacts:
+     def register(self, service: BaseService):
+         if "attention" in service.name.lower():
+             self.attention.register_for_attn(service)
+-        if "runner" in service.name.lower():    
++        # if "runner" in service.name.lower():    
++        #     self.attention._register_method("init_forward_metadata_capture_cuda_graph", service)
++        #     self.attention._register_method("init_forward_metadata_replay_cuda_graph", service)
++        #     self.attention._register_method("update_indices", service)
++        #     self.attention.register_for_runner(service)
++        if "cachemanager" in service.name.lower():
+             self.attention._register_method("init_forward_metadata_capture_cuda_graph", service)
+             self.attention._register_method("init_forward_metadata_replay_cuda_graph", service)
+-            self.attention._register_method("update_indices", service)
+-            self.attention.register_for_runner(service)
++            self.attention._register_obj("decode_cuda_graph_metadata", service)
+ 
+ 
+ class Qwen3Attention(nn.Module, BaseService):
+-
+     @property
+     def name(self):
+-        return "Qwen3Attention"
++        return f"Qwen3Attention_layer_{self.layer_id}"
+     
+     def __init__(
+         self,
+-        attention_backend, 
++        layer_id: int, 
++        attention_backend: any, 
+         hidden_size: int,
+         num_heads: int,
+         num_kv_heads: int,
+@@ -76,6 +83,10 @@ class Qwen3Attention(nn.Module, BaseService):
+     ) -> None:
+         super().__init__()
+         BaseService.__init__(self)
++        self.layer_id = layer_id
++        
++        self.k_cache = self.v_cache = torch.tensor([])
++        
+         tp_size = dist.get_world_size()
+         self.total_num_heads = num_heads
+         assert self.total_num_heads % tp_size == 0
+@@ -87,16 +98,9 @@ class Qwen3Attention(nn.Module, BaseService):
+         self.q_size = self.num_heads * self.head_dim
+         self.kv_size = self.num_kv_heads * self.head_dim
+         self.scaling = self.head_dim**-0.5
+-
+-        # self.artifacts = Qwen3AttentionArtifacts.init_new(
+-        #     self.num_heads,
+-        #     self.head_dim,
+-        #     self.scaling,
+-        #     self.num_kv_heads,
+-        # )
+-        attention_backend.register(self)
+-        # self.artifacts.register(self)
+         
++        attention_backend.register(self)
++                
+         self.qkv_proj = QKVParallelLinear(
+             hidden_size,
+             self.head_dim,
+@@ -134,7 +138,7 @@ class Qwen3Attention(nn.Module, BaseService):
+         k_by_head = self.k_norm(k_by_head)
+         k = k_by_head.view(k.shape)
+         q, k = self.rotary_emb(positions, q, k)
+-        o = self.attn(q, k, v)
++        o = self.attn(q, k, v, self.layer_id)
+         output = self.o_proj(o)
+         return output
+ 
+@@ -172,11 +176,14 @@ class Qwen3DecoderLayer(nn.Module):
+ 
+     def __init__(
+         self,
++        layer_id: int, 
+         attention_backend, 
+         config: Qwen3Config,
+     ) -> None:
+         super().__init__()
++        self.layer_id = layer_id
+         self.self_attn = Qwen3Attention(
++            layer_id, 
+             attention_backend,
+             hidden_size=config.hidden_size,
+             num_heads=config.num_attention_heads,
+@@ -227,8 +234,10 @@ class Qwen3Model(nn.Module):
+         self.embed_tokens = VocabParallelEmbedding(
+             config.vocab_size, config.hidden_size
+         )
++        
++        self.cache_mngr = CacheManager(attention_backend, config)
+         self.layers = nn.ModuleList(
+-            [Qwen3DecoderLayer(attention_backend, config) for _ in range(config.num_hidden_layers)]
++            [Qwen3DecoderLayer(layer_id, attention_backend, config) for layer_id in range(config.num_hidden_layers)]
+         )
+         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+ 
+diff --git a/src/services/nanovllm_v2/utils/__pycache__/context.cpython-312.pyc b/src/services/nanovllm_v3/utils/__pycache__/context.cpython-312.pyc
+index e17a9a6..618ad3c 100644
+Binary files a/src/services/nanovllm_v2/utils/__pycache__/context.cpython-312.pyc and b/src/services/nanovllm_v3/utils/__pycache__/context.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/utils/__pycache__/loader.cpython-312.pyc b/src/services/nanovllm_v3/utils/__pycache__/loader.cpython-312.pyc
+index b642fba..c75c1c5 100644
+Binary files a/src/services/nanovllm_v2/utils/__pycache__/loader.cpython-312.pyc and b/src/services/nanovllm_v3/utils/__pycache__/loader.cpython-312.pyc differ
+diff --git a/src/services/nanovllm_v2/utils/context.py b/src/services/nanovllm_v3/utils/context.py
+index 2281888..718b3ea 100644
+--- a/src/services/nanovllm_v2/utils/context.py
++++ b/src/services/nanovllm_v3/utils/context.py
+@@ -1,6 +1,15 @@
+ from dataclasses import dataclass
+ import torch
+ 
++CUDA_GRAPH_ENABLED = False
++
++def set_cuda_graph_flag():
++    global CUDA_GRAPH_ENABLED
++    CUDA_GRAPH_ENABLED = True
++    
++def get_cuda_graph_flag():
++    global CUDA_GRAPH_ENABLED
++    return CUDA_GRAPH_ENABLED
+ 
+ @dataclass
+ class Context:

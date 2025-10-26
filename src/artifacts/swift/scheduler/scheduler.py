@@ -1,7 +1,7 @@
 from src.core.artifact_base import Artifact
 from src.services.swift.args import EngineArgs
 from src.artifacts.swift.structs import RequestIdManager, SwiftRequest
-from src.core.service_base import BaseService
+from src.core.service_base import AsyncBaseService
 from src.core.utils import cdiv
 from collections import deque
 import dataclasses
@@ -41,7 +41,11 @@ class SchedulerArtifact(Artifact):
 
         self.request_id_manager = RequestIdManager(args.max_seqs_in_block_table)
 
-    def register(self, service: BaseService):
+    @property
+    def name(self):
+        return "swift_scheduler"
+
+    def register(self, service: AsyncBaseService):
         objs_to_register = ["waiting_q", "running_q", "swapped_q"]
         for obj in objs_to_register:
              self._register_obj(obj, service)

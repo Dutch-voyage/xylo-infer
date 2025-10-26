@@ -1,0 +1,1 @@
+from .componentB import ComponentBArtifact

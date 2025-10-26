@@ -1,0 +1,146 @@
+diff --git a/src/artifacts/nanovllm_v2/attention/__pycache__/fa_attention.cpython-312.pyc b/src/artifacts/nanovllm_v2/attention/__pycache__/fa_attention.cpython-312.pyc
+new file mode 100644
+index 0000000..0f74a90
+Binary files /dev/null and b/src/artifacts/nanovllm_v2/attention/__pycache__/fa_attention.cpython-312.pyc differ
+diff --git a/src/artifacts/nanovllm_v1/attention/__pycache__/flashinfer_attention.cpython-312.pyc b/src/artifacts/nanovllm_v2/attention/__pycache__/flashinfer_attention.cpython-312.pyc
+index ab7b9bf..c3929ff 100644
+Binary files a/src/artifacts/nanovllm_v1/attention/__pycache__/flashinfer_attention.cpython-312.pyc and b/src/artifacts/nanovllm_v2/attention/__pycache__/flashinfer_attention.cpython-312.pyc differ
+diff --git a/src/artifacts/nanovllm_v1/attention/flashinfer_attention.py b/src/artifacts/nanovllm_v2/attention/flashinfer_attention.py
+index b82b8ca..bb26726 100644
+--- a/src/artifacts/nanovllm_v1/attention/flashinfer_attention.py
++++ b/src/artifacts/nanovllm_v2/attention/flashinfer_attention.py
+@@ -5,13 +5,13 @@ import triton.language as tl
+ 
+ from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+ from flashinfer import BatchDecodeWithPagedKVCacheWrapper
++from flashinfer.decode import _get_range_buf, get_seq_lens
+ import itertools
+ from typing import Optional, Union
+ 
+ 
+-from src.services.nanovllm_v1.utils.context import get_context
+-from src.services.nanovllm_v1.engine.sequence import Sequence
+-
++from src.services.nanovllm_v2.utils.context import get_context
++from src.services.nanovllm_v2.engine.sequence import Sequence
+ 
+ from src.core.artifact_base import Artifact
+ from src.core.service_base import BaseService
+@@ -68,12 +68,13 @@ class Attention(nn.Module, Artifact):
+     ):
+         super().__init__()
+         Artifact.__init__(self)
++        print("initializing attention")
+         self.num_heads = num_heads
+         self.head_dim = head_dim
+         self.scale = scale
+         self.num_kv_heads = num_kv_heads
+         self.k_cache = self.v_cache = torch.tensor([])
+-        
++
+         global global_workspace_buffer
+         if global_workspace_buffer is None:
+             global_workspace_buffer = torch.empty(
+@@ -102,6 +103,8 @@ class Attention(nn.Module, Artifact):
+             "NHD",
+             use_tensor_cores=True, 
+         )
++        
++        self.decode_cuda_graph_metadata = {}
+                
+     def register_for_attn(self, service: BaseService):
+         methods_to_register = ["attn"]
+@@ -136,17 +139,84 @@ class Attention(nn.Module, Artifact):
+             num_qo_heads=self.num_heads,
+             num_kv_heads=self.num_kv_heads,
+             head_dim=self.head_dim,
+-            page_size=256,
++            page_size=self.block_size,
+             pos_encoding_mode="NONE",
+             q_data_type=torch.bfloat16,
+         )
+     
++    def update_indices(self, 
++                       bs: int, 
++                       decode_wrapper: BatchDecodeWithPagedKVCacheWrapper, 
++                       cu_page_indices: torch.Tensor, 
++                       seq_lens: torch.Tensor, 
++                       ):
++        self.kv_indptr[1: bs + 1] = torch.cumsum(seq_lens, dim=0)
++        self.kv_indptr = self.kv_indptr[: bs + 1]
++        
++        kv_indices = decode_wrapper._paged_kv_indices_buf
++        kv_indices[: cu_page_indices.shape[0]] = cu_page_indices
++        
++        decode_wrapper.begin_forward(
++            indptr=self.kv_indptr,
++            indices=kv_indices,
++            last_page_len=self.kv_last_page_len[:bs],
++            num_qo_heads=self.num_heads,
++            num_kv_heads=self.num_kv_heads,
++            head_dim=self.head_dim,
++            page_size=self.block_size,
++            q_data_type=torch.bfloat16, 
++            non_blocking=True,
++        )
++        
++        
++    def init_forward_metadata_capture_cuda_graph(
++        self, 
++        bs: int, 
++        seq_lens: torch.Tensor, 
++        cu_page_indices: torch.Tensor, 
++    ):
++        decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
++            self.workspace_buffer,
++            "NHD",
++            use_cuda_graph=True, 
++            use_tensor_cores=True, 
++            paged_kv_indptr_buffer=self.kv_indptr[:bs + 1],
++            paged_kv_indices_buffer=self.cuda_graph_kv_indices, 
++            paged_kv_last_page_len_buffer=self.kv_last_page_len[:bs] 
++        )
++        self.update_indices(
++            bs, 
++            decode_wrapper, 
++            cu_page_indices, 
++            seq_lens
++        )
++        # TODO look into sglang's patch to find why there is an performance gain in flashinfer plan
++        # decode_wrapper.begin_forward = partial(
++        #     fast_decode_plan, decode_wrapper
++        # )
++        self.decode_cuda_graph_metadata[bs] = decode_wrapper
++        self.forward_wrapper = decode_wrapper
++    
++    def init_forward_metadata_replay_cuda_graph(
++        self, 
++        bs: int, 
++        seq_lens: torch.Tensor,  
++        cu_page_indices: torch.Tensor, 
++    ):
++        self.update_indices(
++            bs, 
++            self.decode_cuda_graph_metadata[bs], 
++            cu_page_indices, 
++            seq_lens[:bs]
++        )
++
+     def attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor): 
+         o: torch.Tensor
+         q = q.view(-1, self.num_heads, self.head_dim)
+         k = k.view(-1, self.num_kv_heads, self.head_dim)
+         v = v.view(-1, self.num_kv_heads, self.head_dim)
+         context = get_context()
++        print(id(self.k_cache))
+         k_cache, v_cache = self.k_cache, self.v_cache
+         if k_cache.numel() and v_cache.numel():
+             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+@@ -158,6 +228,7 @@ class Attention(nn.Module, Artifact):
+                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
+                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+         else:    # decode
++            # self.prepare_metadata(seqs)
+             o = self.forward_wrapper.forward(q, (self.k_cache, self.v_cache))
+         o = o.view(-1, self.num_heads * self.head_dim)
+         return o

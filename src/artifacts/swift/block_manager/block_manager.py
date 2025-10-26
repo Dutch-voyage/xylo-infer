@@ -2,7 +2,7 @@ import torch
 import dataclasses
 
 from src.core.artifact_base import Artifact
-from src.core.service_base import BaseService
+from src.core.service_base import AsyncBaseService
 from src.services.swift.args import EngineArgs
 from src.artifacts.swift.block_manager.kernels.block_mgmt import set_block_table_and_num_seq_alloc_blocks, unset_block_table_and_num_seq_alloc_blocks, gather_allocated_blocks_and_unset
 
@@ -62,7 +62,11 @@ class BlockManagerArtifact(Artifact):
             device="cuda"
         )
     
-    def register(self, service: BaseService):
+    @property
+    def name(self):
+        return "swift_blockmanager"
+    
+    def register(self, service: AsyncBaseService):
         methods_to_register = [
             'allocate_blocks_for_seqs',
             'free_blocks_for_seqs',

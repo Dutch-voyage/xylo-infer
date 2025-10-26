@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
-from swiftllm.worker.infer_state import LlamaInferState
+from src.artifacts.swift.model_runner.utils.infer_state import LlamaInferState
 
 @triton.jit
 def _fwd_rotary_embedding(

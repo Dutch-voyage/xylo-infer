@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer
 from src.core.artifact_base import Artifact
-from src.core.service_base import BaseService
+from src.core.service_base import AsyncBaseService
 from src.services.swift.args import EngineArgs
 import dataclasses
 
@@ -19,7 +19,11 @@ class TokenizerArtifact(Artifact):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     
-    def register(self, service: BaseService):
+    @property
+    def name(self):
+        return "swift_tokenizer"
+    
+    def register(self, service: AsyncBaseService):
         methods_to_register = ["batched_tokenize", "decode"]
         for method in methods_to_register:
             self._register_method(method, service)

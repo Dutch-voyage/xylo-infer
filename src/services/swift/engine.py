@@ -1,7 +1,7 @@
 import asyncio
 import argparse
 import sys
-from src.core.service_base import BaseService
+from src.core.service_base import AsyncBaseService
 from src.core.utils import GB
 import dataclasses
 from collections import deque
@@ -35,7 +35,10 @@ class DefaultEngineArtifacts:
         model_runner = ModelRunnerArtifact(ModelRunnerArgs.init_new(engine_args))
         
         print("[Engine] Loading weights...")
-        model_runner.load_weights()
+        if engine_args.use_dummy:
+            model_runner.dummy_load_weights()
+        else:
+            model_runner.load_weights()
         
         num_gpu_blocks = model_runner.profile_num_blocks()
         num_cpu_blocks = engine_args.num_cpu_blocks
@@ -45,7 +48,10 @@ class DefaultEngineArtifacts:
         print(f"[Engine] Number of CPU blocks: {num_cpu_blocks} ({num_cpu_blocks*block_size_bytes/GB:.2f} GB)")
         
         print("[Engine] Allocating kv cache and swap...")
-        model_runner.init_kvcache_and_swap(num_gpu_blocks)
+        if engine_args.use_dummy:
+            model_runner.dummy_init_kvcache_and_swap(num_gpu_blocks)
+        else:
+            model_runner.init_kvcache_and_swap(num_gpu_blocks)
 
         model_runner.gpu_block_manager = BlockManagerArtifact(
             BlockManagerArgs.init_new(
@@ -79,7 +85,7 @@ class DefaultEngineArtifacts:
             # gpu_block_manager=gpu_block_manager
         )
 
-    def register(self, service: BaseService):
+    def register(self, service: AsyncBaseService):
         self.request_pool.register(service)
         self.scheduler.register(service)
         self.tokenizer.register(service)
@@ -88,7 +94,7 @@ class DefaultEngineArtifacts:
         # self.gpu_block_manager.register(service)
         
 
-class EngineService(BaseService):
+class EngineService(AsyncBaseService):
     def __init__(self, engine_args: EngineArgs):
         super().__init__()
         self.args = engine_args
@@ -157,7 +163,7 @@ class EngineService(BaseService):
             #     self.forward, 
             #     cur_batch
             # )
-                        
+            
             # print(f"[Engine] length of current running queue {len(self.running_q)}, {id(self.running_q)}")
             
             output_tokens = self.forward(cur_batch)

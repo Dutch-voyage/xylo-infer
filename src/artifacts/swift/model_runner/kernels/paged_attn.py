@@ -2,9 +2,9 @@ import torch
 import triton
 import triton.language as tl
 
-from swiftllm.model_config import LlamaModelConfig
-from swiftllm.engine_config import EngineConfig
-from swiftllm.worker.infer_state import LlamaInferState
+from src.artifacts.swift.model_runner.utils import LlamaModelConfig
+from src.services.swift.args import EngineArgs
+from src.artifacts.swift.model_runner.utils.infer_state import LlamaInferState
 
 @triton.jit
 def _fwd_paged_attention_phase1(
@@ -155,7 +155,7 @@ def paged_attention(
     v_cache: torch.Tensor,
     block_table: torch.Tensor,
     model_config: LlamaModelConfig,
-    engine_config: EngineConfig,
+    engine_config: EngineArgs,
     infer_state: LlamaInferState,
     cur_layer: int,
     o: torch.Tensor     # [num_decoding_seqs, num_q_heads, head_dim]

@@ -23,6 +23,10 @@ class RequestPoolArtifact(Artifact):
         super().__init__()
         self.untokenized_raw_requests: list[tuple[SwiftRequest, str]] = []
 
+    @property
+    def name(self):
+        return "swift_requestpool"
+    
     def register(self, service):
         objs_to_register = ["untokenized_raw_requests"]
         for obj in objs_to_register:

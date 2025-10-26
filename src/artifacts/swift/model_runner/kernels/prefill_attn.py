@@ -2,9 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
-from swiftllm.model_config import LlamaModelConfig
-from swiftllm.engine_config import EngineConfig
-from swiftllm.worker.infer_state import LlamaInferState
+from src.artifacts.swift.model_runner.utils.model_configs import LlamaModelConfig
+from src.artifacts.swift.model_runner.utils.infer_state import LlamaInferState
 
 @triton.jit
 def _fwd_prefill_attention(
@@ -105,7 +104,6 @@ def prefill_attention(
     v: torch.Tensor,    # [num_prefill_tokens, num_kv_heads, head_dim]
     o: torch.Tensor,    # [num_prefill_tokens, num_q_heads, head_dim]
     model_config: LlamaModelConfig,
-    engine_config: EngineConfig,
     infer_state: LlamaInferState,
 ):
     is_rtx4090 = '4090' in torch.cuda.get_device_name(0)

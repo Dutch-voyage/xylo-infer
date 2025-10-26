@@ -2,10 +2,10 @@ import torch
 import triton
 import triton.language as tl
 
-from swiftllm.model_config import LlamaModelConfig
-from swiftllm.engine_config import EngineConfig
-from swiftllm.worker.infer_state import LlamaInferState
-from swiftllm.utils import cdiv
+from src.artifacts.swift.model_runner.utils import LlamaModelConfig
+from src.services.swift.args import EngineArgs
+from src.artifacts.swift.model_runner.utils.infer_state import LlamaInferState
+from src.core.utils import cdiv
 
 @triton.jit
 def _fwd_kvcache_mgmt_prefill_kernel(
@@ -85,7 +85,7 @@ def store_kvcache(
     v_cache: torch.Tensor,
     block_table: torch.Tensor,
     model_config: LlamaModelConfig,
-    engine_config: EngineConfig,
+    engine_config: EngineArgs,
     infer_state: LlamaInferState,
     cur_layer: int
 ):

@@ -4,7 +4,7 @@ import math
 import itertools
 
 from src.core.artifact_base import Artifact
-from src.core.service_base import BaseService
+from src.core.service_base import AsyncBaseService
 
 from src.artifacts.swift.block_manager import BlockManagerArtifact, BlockManagerArgs
 
@@ -12,7 +12,7 @@ from .layers.pre_layer import LlamaPreLayer
 from .layers.transformer_layer import LlamaTransformerLayer
 from .layers.post_layer import LlamaPostLayer
 from src.core.utils import GB
-from src.artifacts.swift.model_runner.utils import load_weights, LlamaModelConfig, LlamaInferState
+from src.artifacts.swift.model_runner.utils import load_weights, dummy_load_weights, LlamaModelConfig, LlamaInferState
 from src.artifacts.swift.model_runner.args import ModelRunnerArgs
 from src.artifacts.swift.structs import SwiftRequest
 import sys
@@ -40,10 +40,40 @@ class ModelRunnerArtifact(Artifact):
         
         self.cpu_block_manager = self.gpu_block_manager = None
     
-    def register(self, service: BaseService):
-        methods_to_register = ["forward", "profile_num_blocks", "load_weights", "init_kvcache_and_swap", "swap_out_seqs", "swap_in_seqs", "free_seqs_resources"]
+    def register(self, service: AsyncBaseService):
+        methods_to_register = ["forward", "profile_num_blocks", "load_weights", "dummy_load_weights", "init_kvcache_and_swap", "dummy_init_kvcache_and_swap", "swap_out_seqs", "swap_in_seqs", "free_seqs_resources"]
         for method in methods_to_register:
             self._register_method(method, service)
+    
+    @property
+    def name(self):
+        return "swift_modelrunner"
+    
+    @torch.inference_mode()
+    def dummy_load_weights(self):
+        self.weight = dummy_load_weights(
+            self.model_config,
+            torch.float16,
+            self.args.model_path,
+            self.args.use_dummy
+        )
+        
+        self._init_to_get_rotary()
+        # Initialize layers
+        decoding_piggyback_stream = torch.cuda.Stream()
+        self.pre_layer = LlamaPreLayer(self.model_config, self.weight)
+        self.transformer_layers = [
+            LlamaTransformerLayer(
+                self.model_config,
+                self.args,
+                self.weight.layers[layer_id],
+                decoding_piggyback_stream,
+                layer_id
+            )
+            for layer_id in range(self.model_config.num_layers)
+        ]
+        self.post_layer = LlamaPostLayer(self.model_config, self.weight)
+    
     
     @torch.inference_mode()
     def load_weights(self):
@@ -120,6 +150,31 @@ class ModelRunnerArtifact(Artifact):
 
         torch.cuda.empty_cache()
         return num_gpu_blocks
+    
+    @torch.inference_mode()
+    def dummy_init_kvcache_and_swap(self, num_blocks: int):
+        self.num_blocks = num_blocks
+        
+        kvcache_shape = (
+            self.num_blocks, 
+            self.model_config.num_layers,
+            self.model_config.num_kv_heads, 
+            self.args.block_size, 
+            self.model_config.head_dim
+        )
+        
+        self.k_cache = torch.zeros(kvcache_shape, dtype=torch.float16, device="meta")
+        self.v_cache = torch.zeros(kvcache_shape, dtype=torch.float16, device="meta")
+        
+        kvswap_shape = (
+            self.args.num_cpu_blocks, 
+            self.model_config.num_layers,
+            self.model_config.num_kv_heads,
+            self.args.block_size,
+            self.model_config.head_dim
+        )
+        self.k_swap = torch.zeros(kvswap_shape, dtype=torch.float16, device="meta")
+        self.v_swap = torch.zeros(kvswap_shape, dtype=torch.float16, device="meta")
     
     @torch.inference_mode()
     def init_kvcache_and_swap(self, num_blocks: int):

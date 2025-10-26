@@ -1,0 +1,323 @@
+diff --git a/src/artifacts/nanovllm_v2/attention/__pycache__/flashinfer_attention.cpython-312.pyc b/src/artifacts/nanovllm_v3/attention/__pycache__/flashinfer_attention.cpython-312.pyc
+index c3929ff..53c907f 100644
+Binary files a/src/artifacts/nanovllm_v2/attention/__pycache__/flashinfer_attention.cpython-312.pyc and b/src/artifacts/nanovllm_v3/attention/__pycache__/flashinfer_attention.cpython-312.pyc differ
+diff --git a/src/artifacts/nanovllm_v2/attention/flashinfer_attention.py b/src/artifacts/nanovllm_v3/attention/flashinfer_attention.py
+index bb26726..2cf09a5 100644
+--- a/src/artifacts/nanovllm_v2/attention/flashinfer_attention.py
++++ b/src/artifacts/nanovllm_v3/attention/flashinfer_attention.py
+@@ -10,8 +10,8 @@ import itertools
+ from typing import Optional, Union
+ 
+ 
+-from src.services.nanovllm_v2.utils.context import get_context
+-from src.services.nanovllm_v2.engine.sequence import Sequence
++from src.services.nanovllm_v3.utils.context import get_context
++from src.services.nanovllm_v3.engine.sequence import Sequence
+ 
+ from src.core.artifact_base import Artifact
+ from src.core.service_base import BaseService
+@@ -41,7 +41,6 @@ def store_kvcache_kernel(
+     tl.store(k_cache_ptr + cache_offsets, key)
+     tl.store(v_cache_ptr + cache_offsets, value)
+ 
+-
+ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
+     N, num_heads, head_dim = key.shape
+     D = num_heads * head_dim
+@@ -51,6 +50,40 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor,
+     assert slot_mapping.numel() == N
+     store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
+ 
++@triton.jit
++def read_kvcache_kernel(
++    k_cache_ptr,
++    v_cache_ptr,
++    slot_mapping_ptr,
++    key_ptr,
++    key_stride,
++    value_ptr,
++    value_stride,
++    D: tl.constexpr,
++):
++    idx = tl.program_id(0)
++    slot = tl.load(slot_mapping_ptr + idx)
++    cache_offsets = slot * D + tl.arange(0, D)
++    key = tl.load(k_cache_ptr + cache_offsets)
++    value = tl.load(v_cache_ptr + cache_offsets)
++    key_offsets = idx * key_stride + tl.arange(0, D)
++    value_offsets = idx * value_stride + tl.arange(0, D)
++    tl.store(key_ptr + key_offsets, key)
++    tl.store(value_ptr + value_offsets, value)
++
++
++def read_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
++    N = slot_mapping.numel()
++    num_heads = k_cache.shape[-2]
++    head_dim = k_cache.shape[-1]
++    D = num_heads * head_dim
++    key = torch.empty((N, num_heads, head_dim), dtype=k_cache.dtype, device=k_cache.device)
++    value = torch.empty((N, num_heads, head_dim), dtype=v_cache.dtype, device=v_cache.device)
++    
++    read_kvcache_kernel[(N,)](k_cache, v_cache, slot_mapping, key, key.stride(0), value, value.stride(0), D)
++    
++    return key, value
++
+ 
+ class Attention(nn.Module, Artifact):
+ 
+@@ -68,12 +101,11 @@ class Attention(nn.Module, Artifact):
+     ):
+         super().__init__()
+         Artifact.__init__(self)
+-        print("initializing attention")
+         self.num_heads = num_heads
+         self.head_dim = head_dim
+         self.scale = scale
+         self.num_kv_heads = num_kv_heads
+-        self.k_cache = self.v_cache = torch.tensor([])
++        # self.k_cache = self.v_cache = torch.tensor([])
+ 
+         global global_workspace_buffer
+         if global_workspace_buffer is None:
+@@ -82,6 +114,8 @@ class Attention(nn.Module, Artifact):
+             )
+         self.workspace_buffer = global_workspace_buffer
+         
++        self.num_layers = model_runner.config.hf_config.num_hidden_layers
++        
+         max_bs = min(model_runner.config.max_num_seqs, 512)
+         
+         self.kv_indptr = torch.zeros(
+@@ -98,22 +132,20 @@ class Attention(nn.Module, Artifact):
+             device=model_runner.device
+         ) 
+         
+-        self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
++        self.decode_wrappers = [BatchDecodeWithPagedKVCacheWrapper(
+             self.workspace_buffer,
+             "NHD",
+             use_tensor_cores=True, 
+-        )
++        )] * self.num_layers
++        
++        self.decode_cuda_graph_metadata = {layer_id: {} for layer_id in range(self.num_layers)}
++        self.forward_wrapper = {layer_id: None for layer_id in range(self.num_layers)}
+         
+-        self.decode_cuda_graph_metadata = {}
+-               
+     def register_for_attn(self, service: BaseService):
+         methods_to_register = ["attn"]
+         for method in methods_to_register:
+             self._register_method(method, service)
+-        objs_to_register = ["k_cache", "v_cache"]
+-        for obj in objs_to_register:
+-            self._register_obj(obj, service)
+-    
++                
+     def register_for_runner(self, service: BaseService):
+         methods_to_regsiter = ["prepare_metadata_for_attn"]
+         for method in methods_to_regsiter:
+@@ -139,7 +171,7 @@ class Attention(nn.Module, Artifact):
+             num_qo_heads=self.num_heads,
+             num_kv_heads=self.num_kv_heads,
+             head_dim=self.head_dim,
+-            page_size=self.block_size,
++            page_size=1,
+             pos_encoding_mode="NONE",
+             q_data_type=torch.bfloat16,
+         )
+@@ -163,17 +195,17 @@ class Attention(nn.Module, Artifact):
+             num_qo_heads=self.num_heads,
+             num_kv_heads=self.num_kv_heads,
+             head_dim=self.head_dim,
+-            page_size=self.block_size,
++            page_size=1,
+             q_data_type=torch.bfloat16, 
+             non_blocking=True,
+         )
+         
+-        
+     def init_forward_metadata_capture_cuda_graph(
+         self, 
+         bs: int, 
+         seq_lens: torch.Tensor, 
+         cu_page_indices: torch.Tensor, 
++        layer_id: int, 
+     ):
+         decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+             self.workspace_buffer,
+@@ -184,6 +216,7 @@ class Attention(nn.Module, Artifact):
+             paged_kv_indices_buffer=self.cuda_graph_kv_indices, 
+             paged_kv_last_page_len_buffer=self.kv_last_page_len[:bs] 
+         )
++        
+         self.update_indices(
+             bs, 
+             decode_wrapper, 
+@@ -194,29 +227,29 @@ class Attention(nn.Module, Artifact):
+         # decode_wrapper.begin_forward = partial(
+         #     fast_decode_plan, decode_wrapper
+         # )
+-        self.decode_cuda_graph_metadata[bs] = decode_wrapper
+-        self.forward_wrapper = decode_wrapper
++        self.decode_cuda_graph_metadata[layer_id][bs] = decode_wrapper
++        self.forward_wrapper[layer_id] = decode_wrapper
+     
+     def init_forward_metadata_replay_cuda_graph(
+         self, 
+         bs: int, 
+         seq_lens: torch.Tensor,  
+         cu_page_indices: torch.Tensor, 
++        layer_id: int, 
+     ):
+         self.update_indices(
+             bs, 
+-            self.decode_cuda_graph_metadata[bs], 
++            self.decode_cuda_graph_metadata[layer_id][bs], 
+             cu_page_indices, 
+             seq_lens[:bs]
+         )
+ 
+-    def attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor): 
++    def attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_id: int): 
+         o: torch.Tensor
+         q = q.view(-1, self.num_heads, self.head_dim)
+         k = k.view(-1, self.num_kv_heads, self.head_dim)
+         v = v.view(-1, self.num_kv_heads, self.head_dim)
+         context = get_context()
+-        print(id(self.k_cache))
+         k_cache, v_cache = self.k_cache, self.v_cache
+         if k_cache.numel() and v_cache.numel():
+             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+@@ -229,6 +262,6 @@ class Attention(nn.Module, Artifact):
+                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+         else:    # decode
+             # self.prepare_metadata(seqs)
+-            o = self.forward_wrapper.forward(q, (self.k_cache, self.v_cache))
++            o = self.forward_wrapper[layer_id].forward(q, (self.k_cache, self.v_cache))
+         o = o.view(-1, self.num_heads * self.head_dim)
+         return o
+diff --git a/src/artifacts/nanovllm_v3/cache_mngr/__pycache__/layerwise.cpython-312.pyc b/src/artifacts/nanovllm_v3/cache_mngr/__pycache__/layerwise.cpython-312.pyc
+new file mode 100644
+index 0000000..c12d564
+Binary files /dev/null and b/src/artifacts/nanovllm_v3/cache_mngr/__pycache__/layerwise.cpython-312.pyc differ
+diff --git a/src/artifacts/nanovllm_v3/cache_mngr/layerwise.py b/src/artifacts/nanovllm_v3/cache_mngr/layerwise.py
+new file mode 100644
+index 0000000..6c816c7
+--- /dev/null
++++ b/src/artifacts/nanovllm_v3/cache_mngr/layerwise.py
+@@ -0,0 +1,114 @@
++from src.core.artifact_base import Artifact
++from src.core.service_base import BaseService
++
++from ..attention.flashinfer_attention import Attention, store_kvcache, read_kvcache
++from src.services.nanovllm_v3.engine.sequence import Sequence
++import torch
++
++import itertools
++
++# all implemntation here
++
++
++class CacheManager(BaseService):
++    @property
++    def name(self):
++        return "CacheManagerLayerwise"
++
++    """
++    This version of implementation only 
++    """
++
++    def __init__(self, attention_backend: Artifact, config):
++        super().__init__()
++
++        attention_backend.register(self)
++
++        self.num_layers = config.num_hidden_layers
++
++        self.seq_to_layer_block_table = {}
++
++        self.per_layer_page_indices = {}
++        self.per_layer_seq_lens = {}
++
++        self.cu_seqs: list[Sequence]
++
++    def init_block_table_after_prefill(self, seqs: list[Sequence]):
++        self.cu_seqs = seqs
++        for seq in seqs:
++            self.seq_to_layer_block_table[seq.seq_id] = {}
++            for layer_id in range(self.num_layers):
++                self.seq_to_layer_block_table[seq.seq_id][
++                    layer_id
++                ] = seq.block_table.copy()
++
++    def prepare_indices_flashinfer(self):
++        # move to model runner before capturing cuda graph
++        for layer_id in range(self.num_layers):
++            cu_page_indices = torch.tensor(
++                list(
++                    itertools.chain(
++                        *[
++                            self.seq_to_layer_block_table[seq.seq_id][layer_id]
++                            for seq in self.cu_seqs
++                        ]
++                    )
++                ),
++                device="cuda",
++            ).to(torch.int32)
++            seq_lens = torch.tensor(
++                [
++                    len(self.seq_to_layer_block_table[seq.seq_id][layer_id])
++                    for seq in self.cu_seqs
++                ],
++                device="cuda",
++            )
++            self.per_layer_page_indices[layer_id] = cu_page_indices
++            self.per_layer_seq_lens[layer_id] = seq_lens
++            # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
++
++    def update_indices_per_layer_capture(self, bs: int):
++        for layer_id in range(self.num_layers):
++            self.init_forward_metadata_capture_cuda_graph(
++                bs,
++                self.per_layer_seq_lens[layer_id][:bs],
++                self.per_layer_page_indices[layer_id],
++                layer_id, 
++            )
++
++    def update_indices_per_layer_replay(self, bs: int):
++        for layer_id in range(self.num_layers):
++            self.init_forward_metadata_replay_cuda_graph(
++                bs,
++                self.per_layer_seq_lens[layer_id][:bs],
++                self.per_layer_page_indices[layer_id],
++                layer_id, 
++            )
++
++    def read_and_write(self, k_cache, v_cache, layer_id: int):
++        """
++        option 1: per-sequence handling
++
++        option 2: like flashinfer's layout, handling with packed indices,
++        """
++        slot_mappings = []
++        for seq in self.cu_seqs:
++            slot_mappings.extend(self.seq_to_layer_block_table[seq.seq_id][layer_id])
++
++        slot_mappings_tensor = torch.tensor(slot_mappings, device="cuda").to(
++            torch.int32
++        )
++
++        key, value = read_kvcache(
++            k_cache=k_cache,
++            v_cache=v_cache,
++            slot_mapping=slot_mappings_tensor,
++        )
++
++        store_kvcache(
++            key=key,
++            value=value,
++            k_cache=k_cache,
++            v_cache=v_cache,
++            slot_mapping=slot_mappings_tensor,
++        )

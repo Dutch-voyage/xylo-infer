@@ -46,7 +46,7 @@ class WeightBase:
             assert weight_value is not None, f"getter() returned None for {item.key} ({item})"
             assert isinstance(weight_value, torch.Tensor), f"Weight {item.key} is not a tensor"
             assert weight_value.shape == item.shape, f"Shape of weight {item.key} does not match"
-            assert weight_value.device.type == "cuda", f"Weight {item.key} is not on GPU"
+            # assert weight_value.device.type == "cuda", f"Weight {item.key} is not on GPU"
             setattr(self, item.attr_name, weight_value.to(item.dtype))
         self._post_process_after_load(getter)
 
@@ -184,6 +184,37 @@ class LlamaWeight(WeightBase):
     def _post_process_after_load(self, getter: callable):
         for layer in self.layers:
             layer.load_weights(getter)
+
+def dummy_load_weights(
+    model_config: LlamaModelConfig, 
+    dtype: torch.dtype, 
+    model_path: str,
+    use_dummy: bool = False, 
+    model_version: str = "auto", 
+):
+    if model_version == "auto":
+        config_path = os.path.join(model_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+                
+            # In Llama 3.2, rope_scaling is a dictionary
+            # TODO 1: Add more robust detection logic
+            # TODO 2: Add more model versions
+            if "rope_scaling" in config_data and isinstance(config_data["rope_scaling"], dict):
+                model_version = "llama3.2"
+            else:
+                model_version = "llama"
+        else:
+            model_version = "llama"
+
+    def weight_getter_dummy(item: RegisteredWeightItem):
+        return torch.empty(item.shape, dtype=item.dtype, device="meta").uniform_(-0.001, 0.001)
+    
+    getter = weight_getter_dummy
+    weight = LlamaWeight(model_config, dtype, model_version)
+    weight.load_weights(getter)
+    return weight
 
 
 def load_weights(
