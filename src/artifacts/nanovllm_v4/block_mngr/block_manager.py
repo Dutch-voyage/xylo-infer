@@ -2,7 +2,9 @@ from collections import deque
 import xxhash
 import numpy as np
 
-from .sequence import Sequence
+from src.services.nanovllm_v4.engine.sequence import Sequence
+
+from src.core.service_base import BaseService
 
 class Block:
 
@@ -22,9 +24,13 @@ class Block:
         self.token_ids = []
 
 
-class BlockManager:
+class BlockManager(BaseService):
+    @property
+    def name(self):
+        return "BlockManager"
 
     def __init__(self, num_blocks: int, block_size: int):
+        super().__init__()
         assert num_blocks > 0
         self.block_size = block_size
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
@@ -94,6 +100,7 @@ class BlockManager:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
 
     def may_append(self, seq: Sequence):
+        per_layer_block_table = self.seq_to_layer_block_table[seq.seq_id]
         block_table = seq.block_table
         # print([self.blocks[index].hash for index in block_table])
         last_block = self.blocks[block_table[-1]]
@@ -102,6 +109,8 @@ class BlockManager:
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
             block_table.append(block_id)
+            for layer_id in range(self.num_layers):
+                per_layer_block_table[layer_id].append(block_id)
             token_ids = seq.block(seq.num_blocks-1)
             prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
             h = self.compute_hash(token_ids, prefix)
@@ -113,6 +122,8 @@ class BlockManager:
                 block_id = self.free_block_ids[0]
                 self._allocate_block(block_id)
                 block_table.append(block_id)
+                for layer_id in range(self.num_layers):
+                    per_layer_block_table[layer_id].append(block_id)
             elif len(seq) % self.block_size == 0:
                 assert last_block.hash == -1
                 token_ids = seq.block(seq.num_blocks-1)

@@ -12,14 +12,14 @@ from ..layers.linear import (
 )
 from ..layers.rotary_embedding import get_rope
 from ..layers.embed_head import VocabParallelEmbedding, ParallelLMHead
-from src.services.nanovllm_v3.engine.sequence import Sequence
-from src.artifacts.nanovllm_v3.cache_mngr.layerwise import CacheManager
+from src.services.nanovllm_v4.engine.sequence import Sequence
+from src.artifacts.nanovllm_v4.cache_mngr.layerwise import CacheManager
 
 from src.core.service_base import BaseService
 from src.core.artifact_base import Artifact
 import dataclasses
 
-from src.services.nanovllm_v3.utils.context import get_cuda_graph_flag
+from src.services.nanovllm_v4.utils.context import get_cuda_graph_flag
 
 
 @dataclasses.dataclass
@@ -32,7 +32,7 @@ class Qwen3AttentionArtifacts:
         model_runner, 
         config
     ):
-        from src.artifacts.nanovllm_v3.attention.flashinfer_attention import Attention
+        from src.artifacts.nanovllm_v4.attention.flashinfer_attention import Attention
         tp_size = dist.get_world_size()
         num_heads = config.num_attention_heads // tp_size
         num_kv_heads = config.num_key_value_heads // tp_size
@@ -52,11 +52,12 @@ class Qwen3AttentionArtifacts:
         if "attention" in service.name.lower():
             self.attention.register_for_attn(service)
         # if "runner" in service.name.lower():    
-        #     self.attention._register_method("init_forward_metadata_capture_cuda_graph", service)
-        #     self.attention._register_method("init_forward_metadata_replay_cuda_graph", service)
-        #     self.attention._register_method("update_indices", service)
+        #     # self.attention._register_method("init_forward_metadata_capture_cuda_graph", service)
+        #     # self.attention._register_method("init_forward_metadata_replay_cuda_graph", service)
+        #     # self.attention._register_method("update_indices", service)
         #     self.attention.register_for_runner(service)
         if "cachemanager" in service.name.lower():
+            self.attention._register_method("prepare_metadata_for_attn", service)
             self.attention._register_method("init_forward_metadata_capture_cuda_graph", service)
             self.attention._register_method("init_forward_metadata_replay_cuda_graph", service)
             self.attention._register_obj("decode_cuda_graph_metadata", service)
@@ -85,7 +86,7 @@ class Qwen3Attention(nn.Module, BaseService):
         BaseService.__init__(self)
         self.layer_id = layer_id
         
-        self.k_cache = self.v_cache = torch.tensor([])
+        self.k_cache = self.v_cache = self.q_cache = torch.tensor([])
         
         tp_size = dist.get_world_size()
         self.total_num_heads = num_heads
@@ -235,7 +236,7 @@ class Qwen3Model(nn.Module):
             config.vocab_size, config.hidden_size
         )
         
-        self.cache_mngr = CacheManager(attention_backend, config)
+        
         self.layers = nn.ModuleList(
             [Qwen3DecoderLayer(layer_id, attention_backend, config) for layer_id in range(config.num_hidden_layers)]
         )

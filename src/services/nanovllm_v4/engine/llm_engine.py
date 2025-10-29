@@ -9,7 +9,7 @@ from ..config import Config
 from ..sampling_params import SamplingParams
 from .sequence import Sequence
 from .scheduler import Scheduler
-from src.services.nanovllm_v3.model_runner import ModelRunner
+from src.services.nanovllm_v4.model_runner import ModelRunner
 
 
 class LLMEngine:
@@ -27,10 +27,21 @@ class LLMEngine:
             process.start()
             self.ps.append(process)
             self.events.append(event)
+        
         self.model_runner = ModelRunner(config, 0, self.events)
+        self.scheduler = Scheduler(config)
+        
+        self.scheduler.block_manager._register_method("_deallocate_block", self.model_runner.cache_mngr)
+        self.scheduler.block_manager._register_obj("blocks", self.model_runner.cache_mngr)
+        
+        self.model_runner.cache_mngr._register_obj("seq_to_layer_block_table", self.scheduler.block_manager)
+        self.model_runner.cache_mngr._register_obj("num_layers", self.scheduler.block_manager)
+                
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
-        self.scheduler = Scheduler(config)
+        
+        self.cur_step = 0
+        
         atexit.register(self.exit)
 
     def exit(self):
@@ -48,9 +59,13 @@ class LLMEngine:
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
         token_ids = self.model_runner.call("run", seqs, is_prefill)
+        if self.cur_step % 128 == 0:
+            self.model_runner.call("compress")
         self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
+        
+        self.cur_step += 1
         return outputs, num_tokens
 
     def is_finished(self):

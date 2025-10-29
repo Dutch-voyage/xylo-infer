@@ -15,7 +15,11 @@ from src.core.service_base import BaseService
 import itertools
 from ..engine.io_struct import SamplingInfo
 
-from src.services.nanovllm_v3.utils.context import set_cuda_graph_flag
+from src.services.nanovllm_v4.utils.context import set_cuda_graph_flag
+
+from src.artifacts.nanovllm_v4.cache_mngr.layerwise import CacheManager
+
+from src.artifacts.nanovllm_v4.cache_mngr.snapKV import SnapKVCluster
 
 from enum import Enum
 
@@ -34,6 +38,7 @@ class ModelRunner(BaseService):
         BaseService.__init__(self)
         self.config = config
         hf_config = config.hf_config
+        self.query_window_size = config.query_window_size
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
@@ -46,16 +51,20 @@ class ModelRunner(BaseService):
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
-        from src.services.nanovllm_v3.model_runner.models.qwen3 import Qwen3AttentionArtifacts
+        from src.services.nanovllm_v4.model_runner.models.qwen3 import Qwen3AttentionArtifacts
         self.attention_backend = Qwen3AttentionArtifacts.init_new(self, hf_config)
         self.attention_backend.register(self)
         self.model = Qwen3ForCausalLM(self.attention_backend, hf_config)
         load_model(self.model, config.model)
         
-        self.model.model.cache_mngr._register_method("init_block_table_after_prefill", self)
-        self.model.model.cache_mngr._register_method("prepare_indices_flashinfer", self)
-        self.model.model.cache_mngr._register_method("update_indices_per_layer_capture", self)
-        self.model.model.cache_mngr._register_method("update_indices_per_layer_replay", self)
+        self.compressor = SnapKVCluster(window_size=32, max_capacity_prompt=128)
+        
+        self.cache_mngr = CacheManager(self.attention_backend, config, self.compressor)
+        self.cache_mngr._register_method("init_block_table_after_prefill", self)
+        self.cache_mngr._register_method("prepare_indices_flashinfer", self)
+        self.cache_mngr._register_method("update_indices_per_layer", self)
+        self.cache_mngr._register_method("update_indices_per_layer_capture", self)
+        self.cache_mngr._register_method("update_indices_per_layer_replay", self)
 
         
         self.sampler = Sampler()
@@ -121,6 +130,13 @@ class ModelRunner(BaseService):
         method = getattr(self, method_name, None)
         return method(*args)
 
+    def compress(self):
+        layer_id = 0
+        for module in self.model.modules():
+            if hasattr(module, "k_cache") and hasattr(module, "v_cache") and hasattr(module, "q_cache"):
+                self.cache_mngr.read_and_store_cache(module.q_cache, module.k_cache, module.v_cache, layer_id)
+                layer_id += 1
+
     def warmup_model(self):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -133,6 +149,10 @@ class ModelRunner(BaseService):
     def allocate_kv_cache(self):
         config = self.config
         hf_config = config.hf_config
+        try:
+            self.q_cache = torch.zeros(hf_config.num_hidden_layers, self.config.max_num_seqs, self.query_window_size, hf_config.num_attention_heads, hf_config.head_dim, dtype=hf_config.torch_dtype)
+        except:
+            raise ValueError("Not enough memory for q_cache, try to lower memory occupation of other process or lower \"config.max_num_seqs\"")
         free, total = torch.cuda.mem_get_info()
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
@@ -142,11 +162,13 @@ class ModelRunner(BaseService):
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.zeros(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, hf_config.head_dim)
+
         layer_id = 0
         for module in self.model.modules():
-            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
+            if hasattr(module, "k_cache") and hasattr(module, "v_cache") and hasattr(module, "q_cache"):
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
+                module.q_cache = self.q_cache[layer_id]
                 layer_id += 1
 
     def prepare_block_tables(self, seqs: list[Sequence]):
@@ -163,7 +185,10 @@ class ModelRunner(BaseService):
         max_seqlen_q = 0
         max_seqlen_k = 0
         slot_mapping = []
+        query_window_pos = []
+        query_slot_mapping = []
         block_tables = None
+        
         for seq in seqs:
             seqlen = len(seq)
             input_ids.extend(seq[seq.num_cached_tokens:])
@@ -174,6 +199,11 @@ class ModelRunner(BaseService):
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
+            
+            # prepare query window metadata
+            query_window_pos.extend(list(range(seq.num_tokens - seq.query_window_num_tokens, seq.num_tokens)))
+            query_slot_mapping.extend(list(range(seq.query_block_id * self.query_window_size, seq.query_block_id * self.query_window_size + seq.query_window_num_tokens)))
+
             if not seq.block_table:
                 continue
             for i in range(seq.num_cached_blocks, seq.num_blocks):
@@ -190,7 +220,13 @@ class ModelRunner(BaseService):
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
+        
+        query_slot_mapping = torch.tensor(query_slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        query_window_pos = torch.tensor(query_window_pos, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        
+        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, query_slot_mapping, query_window_pos)
+
+        self.init_block_table_after_prefill(seqs)
         
         return input_ids, positions
 
@@ -199,25 +235,35 @@ class ModelRunner(BaseService):
         positions = []
         slot_mapping = []
         context_lens = []
+
+        query_slot_mapping = []
+
         for seq in seqs:
             input_ids.append(seq.last_token)
             positions.append(len(seq))
             context_lens.append(len(seq))
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
+            
+            # prepare query window metadata
+            query_slot_mapping.append(seq.query_block_id * self.query_window_size + seq.last_query_window_index)
+            
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        
+        query_slot_mapping = torch.tensor(query_slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        
+        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables, query_slot_mapping=query_slot_mapping)
+        
+        self.prepare_indices_flashinfer(seqs)
         
         if not self.enforce_eager and stage != RunningStage.WARMUP:
             # cuda_graph enabled
-            self.init_block_table_after_prefill(seqs)
-            self.prepare_indices_flashinfer()
             self.update_indices_per_layer_replay(bs=len(seqs))
         else:
-            self.prepare_metadata_for_attn(seqs)
+            self.update_indices_per_layer()
         return input_ids, positions
 
     # def prepare_sample(self, seqs: list[Sequence]):
@@ -245,6 +291,7 @@ class ModelRunner(BaseService):
             graph_vars["input_ids"][:bs] = input_ids
             graph_vars["positions"][:bs] = positions
             graph_vars["slot_mapping"][:bs] = context.slot_mapping
+            graph_vars["query_slot_mapping"][:bs] = context.query_slot_mapping
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
             graph.replay()
@@ -256,6 +303,8 @@ class ModelRunner(BaseService):
         sampling_infos = self.prepare_sample(seqs).to(input_ids.device) if self.rank == 0 else None
         
         logits = self.run_model(input_ids, positions, is_prefill)
+        
+        
         token_ids = self.sampler(logits, sampling_infos).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids
@@ -269,13 +318,13 @@ class ModelRunner(BaseService):
         input_ids = torch.zeros(max_bs, dtype=torch.int64)
         positions = torch.zeros(max_bs, dtype=torch.int64)
         slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
+        query_slot_mapping = torch.zeros(max_bs, dtype=torch.int32) 
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         
         seqs = [Sequence.for_capture([0]) for _ in range(max_bs)]
         self.init_block_table_after_prefill(seqs)
-        self.prepare_indices_flashinfer()
-        
+        self.prepare_indices_flashinfer(seqs)
         
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
@@ -284,7 +333,7 @@ class ModelRunner(BaseService):
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
+            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs], query_slot_mapping=query_slot_mapping[:bs])
             # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
             self.update_indices_per_layer_capture(bs)
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
@@ -300,6 +349,7 @@ class ModelRunner(BaseService):
             input_ids=input_ids,
             positions=positions,
             slot_mapping=slot_mapping,
+            query_slot_mapping=query_slot_mapping, 
             context_lens=context_lens,
             block_tables=block_tables,
             outputs=outputs,

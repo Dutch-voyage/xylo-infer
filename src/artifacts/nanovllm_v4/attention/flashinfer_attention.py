@@ -10,8 +10,8 @@ import itertools
 from typing import Optional, Union
 
 
-from src.services.nanovllm_v3.utils.context import get_context
-from src.services.nanovllm_v3.engine.sequence import Sequence
+from src.services.nanovllm_v4.utils.context import get_context
+from src.services.nanovllm_v4.engine.sequence import Sequence
 
 from src.core.artifact_base import Artifact
 from src.core.service_base import BaseService
@@ -49,6 +49,78 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor,
     assert k_cache.stride(1) == D and v_cache.stride(1) == D
     assert slot_mapping.numel() == N
     store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
+
+
+@triton.jit
+def store_q_cache_kernel_prefill(
+    q_cache_ptr, 
+    query_slot_mapping_ptr, 
+    query_window_pos_ptr, 
+    query_ptr, 
+    query_stride, 
+    D: tl.constexpr,
+):
+    idx = tl.program_id(0)
+    query_slot = tl.load(query_slot_mapping_ptr + idx)
+    query_window_pos = tl.load(query_window_pos_ptr + idx)
+    cache_offsets = query_slot * D + tl.arange(0, D)
+    query_offsets = query_window_pos * query_stride + tl.arange(0, D)
+    query = tl.load(query_ptr + query_offsets)
+    tl.store(q_cache_ptr + cache_offsets, query)
+
+
+@triton.jit
+def store_q_cache_kernel_decode(
+    q_cache_ptr,
+    query_slot_mapping_ptr, 
+    query_ptr, 
+    query_stride, 
+    D: tl.constexpr
+):
+    idx = tl.program_id(0)
+    query_slot = tl.load(query_slot_mapping_ptr + idx)
+    cache_offsets = query_slot * D + tl.arange(0, D)
+    query_offsets = idx * query_stride + tl.arange(0, D)
+    query = tl.load(query_ptr + query_offsets)
+    tl.store(q_cache_ptr + cache_offsets, query)
+
+
+def store_q_cache(query: torch.Tensor, q_cache: torch.Tensor, query_slot_mapping: torch.Tensor, query_window_pos: torch.Tensor=None, is_prefill: bool = True):
+    _, num_heads, head_dim = query.shape
+    D = num_heads * head_dim
+    N = query_slot_mapping.shape[0]
+    
+    if is_prefill:
+        assert query_window_pos.numel() == N
+        store_q_cache_kernel_prefill[(N,)](q_cache, query_slot_mapping, query_window_pos, query, query.stride(0), D)
+    else:
+        store_q_cache_kernel_decode[(N, )](q_cache, query_slot_mapping, query, query.stride(0), D)
+
+
+@triton.jit
+def read_q_cache_kernel(
+    q_cache_ptr, 
+    query_slot_mapping_ptr,
+    query_ptr, 
+    L: tl.constexpr, 
+    D: tl.constexpr, 
+):
+    n_idx = tl.program_id(0)
+    l_idx = tl.program_id(1)
+    query_slot = tl.load(query_slot_mapping_ptr + n_idx)
+
+    cache_offsets = query_slot * L * D + l_idx * D + tl.arange(0, D)
+    query_offsets = n_idx * L * D + l_idx * D + tl.arange(0, D)
+    query = tl.load(q_cache_ptr + cache_offsets)
+    tl.store(query_ptr + query_offsets, query)
+
+def read_q_cache(q_cache: torch.Tensor, query_slot_mapping: torch.Tensor):
+    _, L, num_heads, head_dim = q_cache.shape
+    D = num_heads * head_dim
+    N = query_slot_mapping.shape[0]
+    query = torch.empty((N, L, num_heads, head_dim), dtype=q_cache.dtype, device="cuda")
+    read_q_cache_kernel[(N, L,)](q_cache, query_slot_mapping, query, L, D)
+    return query
 
 @triton.jit
 def read_kvcache_kernel(
@@ -139,7 +211,7 @@ class Attention(nn.Module, Artifact):
         )] * self.num_layers
         
         self.decode_cuda_graph_metadata = {layer_id: {} for layer_id in range(self.num_layers)}
-        self.forward_wrapper = {layer_id: None for layer_id in range(self.num_layers)}
+        self.forward_wrapper = {layer_id: self.decode_wrappers[layer_id] for layer_id in range(self.num_layers)}
         
     def register_for_attn(self, service: BaseService):
         methods_to_register = ["attn"]
@@ -151,22 +223,18 @@ class Attention(nn.Module, Artifact):
         for method in methods_to_regsiter:
             self._register_method(method, service)
     
-    def prepare_metadata_for_attn(self, seqs: list[Sequence]):
+    def prepare_metadata_for_attn(self, seq_lens, cu_page_indices, layer_id):
         """See https://docs.flashinfer.ai/tutorials/kv_layout.html#page-table-layout for metadata required for flashinfer kernel"""
-        kv_indptr = torch.cumsum(
-            torch.tensor([0] + [len(seq.block_table) for seq in seqs], device="cuda"),
-            dim=0,
-        ).to(torch.int32)
-        kv_page_indices = torch.tensor(
-            list(itertools.chain(*[seq.block_table for seq in seqs])), device="cuda"
-        ).to(torch.int32)
-        kv_last_page_lens = torch.tensor(
-            [seq.last_block_num_tokens for seq in seqs], device="cuda"
-        ).to(torch.int32)
-    
-        self.decode_wrapper.plan(
+        kv_indptr = torch.zeros((seq_lens.shape[0] + 1,), device="cuda").to(torch.int32)
+        kv_indptr[1:] = torch.cumsum(seq_lens, dim=0)
+        kv_last_page_lens = torch.ones(
+            (seq_lens.shape[0],), device="cuda"
+        ).to(torch.int32)  
+        
+        
+        self.forward_wrapper[layer_id].begin_forward(
             indptr=kv_indptr,
-            indices=kv_page_indices,
+            indices=cu_page_indices,
             last_page_len=kv_last_page_lens,
             num_qo_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
@@ -249,6 +317,7 @@ class Attention(nn.Module, Artifact):
         q = q.view(-1, self.num_heads, self.head_dim)
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
+
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache.numel() and v_cache.numel():
@@ -256,12 +325,13 @@ class Attention(nn.Module, Artifact):
         if context.is_prefill:
             if context.block_tables is not None:
                 k, v = k_cache, v_cache
+            store_q_cache(q, self.q_cache, context.query_slot_mapping, context.query_window_pos, is_prefill=True)
             o = flash_attn_varlen_func(q, k, v,
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
-            # self.prepare_metadata(seqs)
+            store_q_cache(q, self.q_cache, context.query_slot_mapping, is_prefill=False)
             o = self.forward_wrapper[layer_id].forward(q, (self.k_cache, self.v_cache))
         o = o.view(-1, self.num_heads * self.head_dim)
         return o

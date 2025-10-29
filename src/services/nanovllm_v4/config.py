@@ -7,7 +7,7 @@ from transformers import AutoConfig
 class Config:
     model: str
     max_num_batched_tokens: int = 262144
-    max_num_seqs: int = 512
+    max_num_seqs: int = 128
     max_model_len: int = 32768
     gpu_memory_utilization: float = 0.7
     tensor_parallel_size: int = 1
@@ -15,6 +15,7 @@ class Config:
     hf_config: AutoConfig | None = None
     eos: int = -1
     kvcache_block_size: int = 1
+    query_window_size: int = 128
     num_kvcache_blocks: int = -1
 
     def __post_init__(self):

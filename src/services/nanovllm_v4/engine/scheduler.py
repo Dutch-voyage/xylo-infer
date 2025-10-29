@@ -2,7 +2,9 @@ from collections import deque
 
 from ..config import Config
 from .sequence import Sequence, SequenceStatus
-from .block_manager import BlockManager
+from src.artifacts.nanovllm_v4.block_mngr.block_manager import BlockManager
+
+from src.artifacts.nanovllm_v4.block_mngr.query_block_manger import QueryBlockManager
 
 
 class Scheduler:
@@ -12,6 +14,7 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        self.query_block_manager = QueryBlockManager(config.max_num_seqs, config.query_window_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -32,6 +35,7 @@ class Scheduler:
                 break
             num_seqs += 1
             self.block_manager.allocate(seq)
+            self.query_block_manager.allocate(seq)
             num_batched_tokens += len(seq) - seq.num_cached_tokens
             seq.status = SequenceStatus.RUNNING
             self.waiting.popleft()
@@ -52,6 +56,7 @@ class Scheduler:
             else:
                 num_seqs += 1
                 self.block_manager.may_append(seq)
+                self.query_block_manager.may_append(seq)
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))
@@ -60,6 +65,7 @@ class Scheduler:
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
+        self.query_block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
@@ -68,4 +74,5 @@ class Scheduler:
             if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)
+                self.query_block_manager.deallocate(seq)
                 self.running.remove(seq)

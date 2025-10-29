@@ -12,12 +12,14 @@ class SequenceStatus(Enum):
 
 
 class Sequence:
+    query_window_size = 128
     block_size = 1
     counter = count()
     cuda_graph_counter = count()
     
     def __init__(self):
         self.block_table: list[int] = []
+        self.query_block_id: int = -1
         self.num_tokens: int = 0
         self.num_prompt_tokens: int = 0
         self.num_cached_tokens: int = 0
@@ -31,9 +33,10 @@ class Sequence:
         return seq
     
     @classmethod
-    def from_prompt(cls, token_ids: list[int], sampling_params = SamplingParams(), kvcache_block_size = 1):
+    def from_prompt(cls, token_ids: list[int], sampling_params = SamplingParams(), kvcache_block_size = 1, query_window_size = 128):
         seq = cls()
         seq.block_size = kvcache_block_size
+        seq.query_window_size = query_window_size
         seq.seq_id = next(Sequence.counter)
         seq.status = SequenceStatus.WAITING
         seq.token_ids = copy(token_ids)
@@ -57,6 +60,10 @@ class Sequence:
 
     def __getitem__(self, key):
         return self.token_ids[key]
+
+    @property
+    def query_window_num_tokens(self):
+        return min(self.query_window_size, self.num_tokens)
 
     @property
     def is_finished(self):
@@ -87,7 +94,9 @@ class Sequence:
         return self.num_tokens - (self.num_blocks - 1) * self.block_size
 
     def block(self, i):
-        assert 0 <= i < self.num_blocks
+        assert -1 <= i < self.num_blocks
+        if i == -1:
+            return self.token_ids[-self.block_size:]
         return self.token_ids[i*self.block_size: (i+1)*self.block_size]
 
     def append_token(self, token_id: int):
