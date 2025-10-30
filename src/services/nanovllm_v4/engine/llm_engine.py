@@ -11,6 +11,7 @@ from .sequence import Sequence
 from .scheduler import Scheduler
 from src.services.nanovllm_v4.model_runner import ModelRunner
 
+from src.services.nanovllm_v4.utils.logging import get_log, LogCollector
 
 class LLMEngine:
 
@@ -27,6 +28,8 @@ class LLMEngine:
             process.start()
             self.ps.append(process)
             self.events.append(event)
+        
+        self.log_collector = LogCollector()
         
         self.model_runner = ModelRunner(config, 0, self.events)
         self.scheduler = Scheduler(config)
@@ -59,8 +62,8 @@ class LLMEngine:
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
         token_ids = self.model_runner.call("run", seqs, is_prefill)
-        if self.cur_step % 128 == 0:
-            self.model_runner.call("compress")
+        # if self.cur_step % self.config.steps_between_cache_compressions == 0:
+        #     self.model_runner.call("compress")
         self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
@@ -88,6 +91,7 @@ class LLMEngine:
         while not self.is_finished():
             t = perf_counter()
             output, num_tokens = self.step()
+            self.log_collector.append(perf_counter(), get_log().occupied_pages)
             if use_tqdm:
                 if num_tokens > 0:
                     prefill_throughput = num_tokens / (perf_counter() - t)
@@ -96,10 +100,12 @@ class LLMEngine:
                 pbar.set_postfix({
                     "Prefill": f"{int(prefill_throughput)}tok/s",
                     "Decode": f"{int(decode_throughput)}tok/s",
+                    "Occupied Pages": get_log().occupied_pages,
                 })
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids
             pbar.update(1)
+        self.log_collector.save(self.config.log_path)
         outputs = [outputs[seq_id] for seq_id in sorted(outputs)]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
         if use_tqdm:

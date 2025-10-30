@@ -88,10 +88,12 @@ class Artifact(ABC):
                             # print(f"[Proxy] Accessing registered attribute '{name}': {hasattr(self_service, name)}")
                             if hasattr(self_service, name):
                                 return getattr(self_service, name)
-                            
-                            # print(name, hasattr(self_artifact, name))
-                            # Then check if it's available in the artifact instance
-                            raise AttributeError(f"'{type(self_service).__name__}' object has no attribute '{name}'")
+                            elif hasattr(self_artifact, name):
+                                return getattr(self_artifact, name)
+                            else:
+                                # print(name, hasattr(self_artifact, name))
+                                # Then check if it's available in the artifact instance
+                                raise AttributeError(f"'{type(self_service).__name__}' object has no attribute '{name}'")
                         else:
                             if hasattr(self_service, name):
                                 return getattr(self_service, name)

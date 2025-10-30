@@ -12,6 +12,8 @@ import torch
 
 import itertools
 
+from src.services.nanovllm_v4.utils.logging import get_log, set_log
+
 # all implemntation here
 
 
@@ -39,70 +41,103 @@ class CacheManager(BaseService):
         self.cu_seqs: list[Sequence]
 
         self.compressor = compressor
-        
-        self.compressor.window_size = config.query_window_size
-        self.compressor.max_prompt_capacity = config.layer_budget
 
     def init_block_table_after_prefill(self, seqs: list[Sequence]):
         self.cu_seqs = seqs
         for seq in seqs:
             self.seq_to_layer_block_table[seq.seq_id] = {}
-            for layer_id in range(self.num_layers):
+            for layer_id in range(-1, self.num_layers):
                 self.seq_to_layer_block_table[seq.seq_id][
                     layer_id
                 ] = seq.block_table.copy()
+            # self.seq_to_layer_block_table[seq.seq_id][-1] = seq.block_table.copy()
 
     def prepare_indices_flashinfer(self, seqs):
         # move to model runner before capturing cuda graph
         self.cu_seqs = seqs
-        for layer_id in range(self.num_layers):
-            cu_page_indices = torch.tensor(
-                list(
-                    itertools.chain(
-                        *[
-                            self.seq_to_layer_block_table[seq.seq_id][layer_id]
-                            for seq in self.cu_seqs
-                        ]
-                    )
-                ),
-                device="cuda",
-            ).to(torch.int32)
-            seq_lens = torch.tensor(
-                [
-                    len(self.seq_to_layer_block_table[seq.seq_id][layer_id])
-                    for seq in self.cu_seqs
-                ],
-                device="cuda",
-            )
-            self.per_layer_page_indices[layer_id] = cu_page_indices
-            self.per_layer_seq_lens[layer_id] = seq_lens
-            # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
+        occupied_pages = 0
+        cu_page_indices = torch.tensor(
+            list(itertools.chain(*[self.seq_to_layer_block_table[seq.seq_id][-1] for seq in self.cu_seqs]))
+        )
+        
+        occupied_pages += cu_page_indices.shape[0]
+        seq_lens = torch.tensor(
+            [len(self.seq_to_layer_block_table[seq.seq_id][-1]) for seq in self.cu_seqs]
+        )
+        self.per_layer_page_indices[-1] = cu_page_indices.to(torch.int32)
+        self.per_layer_seq_lens[-1] = seq_lens.to(torch.int32)
+        
+        # for layer_id in range(self.num_layers):
+        #     cu_page_indices = torch.tensor(
+        #         list(
+        #             itertools.chain(
+        #                 *[
+        #                     self.seq_to_layer_block_table[seq.seq_id][layer_id]
+        #                     for seq in self.cu_seqs
+        #                 ]
+        #             )
+        #         ),
+        #         device="cuda",
+        #     ).to(torch.int32)
+        #     occupied_pages += cu_page_indices.shape[0]
+        #     seq_lens = torch.tensor(
+        #         [
+        #             len(self.seq_to_layer_block_table[seq.seq_id][layer_id])
+        #             for seq in self.cu_seqs
+        #         ],
+        #         device="cuda",
+        #     )
+        #     self.per_layer_page_indices[layer_id] = cu_page_indices
+        #     self.per_layer_seq_lens[layer_id] = seq_lens
+        #     # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
 
+        log = get_log()
+        log.occupied_pages = occupied_pages
+        set_log(log)
+        
     def update_indices_per_layer(self):
-        for layer_id in range(self.num_layers):
-            self.prepare_metadata_for_attn(
-                self.per_layer_seq_lens[layer_id],
-                self.per_layer_page_indices[layer_id],
-                layer_id,
-            )
+        self.prepare_metadata_for_attn(
+            self.per_layer_seq_lens[-1],
+            self.per_layer_page_indices[-1],
+            -1,
+        )
+        # for layer_id in range(self.num_layers):
+        #     self.prepare_metadata_for_attn(
+        #         self.per_layer_seq_lens[layer_id],
+        #         self.per_layer_page_indices[layer_id],
+        #         layer_id,
+        #     )
 
     def update_indices_per_layer_capture(self, bs: int):
-        for layer_id in range(self.num_layers):
-            self.init_forward_metadata_capture_cuda_graph(
-                bs,
-                self.per_layer_seq_lens[layer_id][:bs],
-                self.per_layer_page_indices[layer_id],
-                layer_id,
-            )
+        self.init_forward_metadata_capture_cuda_graph(
+            bs,
+            self.per_layer_seq_lens[-1][:bs],
+            self.per_layer_page_indices[-1],
+            -1,
+        )
+        # for layer_id in range(self.num_layers):
+        #     self.init_forward_metadata_capture_cuda_graph(
+        #         bs,
+        #         self.per_layer_seq_lens[layer_id][:bs],
+        #         self.per_layer_page_indices[layer_id],
+        #         layer_id,
+        #     )
 
     def update_indices_per_layer_replay(self, bs: int):
-        for layer_id in range(self.num_layers):
-            self.init_forward_metadata_replay_cuda_graph(
-                bs,
-                self.per_layer_seq_lens[layer_id][:bs],
-                self.per_layer_page_indices[layer_id],
-                layer_id,
-            )
+        self.init_forward_metadata_replay_cuda_graph(
+            bs,
+            self.per_layer_seq_lens[-1][:bs],
+            self.per_layer_page_indices[-1],
+            -1,
+        )
+        
+        # for layer_id in range(self.num_layers):
+        #     self.init_forward_metadata_replay_cuda_graph(
+        #         bs,
+        #         self.per_layer_seq_lens[layer_id][:bs],
+        #         self.per_layer_page_indices[layer_id],
+        #         layer_id,
+        #     )
 
     def read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id: int):
         """

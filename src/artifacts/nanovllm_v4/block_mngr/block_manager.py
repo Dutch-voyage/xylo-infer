@@ -109,8 +109,12 @@ class BlockManager(BaseService):
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
             block_table.append(block_id)
-            for layer_id in range(self.num_layers):
-                per_layer_block_table[layer_id].append(block_id)
+            
+            # for layer_id in range(self.num_layers):
+            #     per_layer_block_table[layer_id].append(block_id)
+            
+            per_layer_block_table[-1].append(block_id)
+            
             token_ids = seq.block(seq.num_blocks-1)
             prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
             h = self.compute_hash(token_ids, prefix)
@@ -122,8 +126,10 @@ class BlockManager(BaseService):
                 block_id = self.free_block_ids[0]
                 self._allocate_block(block_id)
                 block_table.append(block_id)
-                for layer_id in range(self.num_layers):
-                    per_layer_block_table[layer_id].append(block_id)
+                
+                # for layer_id in range(self.num_layers):
+                #     per_layer_block_table[layer_id].append(block_id)
+                per_layer_block_table[-1].append(block_id)
             elif len(seq) % self.block_size == 0:
                 assert last_block.hash == -1
                 token_ids = seq.block(seq.num_blocks-1)

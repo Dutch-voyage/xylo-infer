@@ -211,8 +211,17 @@ class Attention(nn.Module, Artifact):
         )] * self.num_layers
         
         self.decode_cuda_graph_metadata = {layer_id: {} for layer_id in range(self.num_layers)}
-        self.forward_wrapper = {layer_id: self.decode_wrappers[layer_id] for layer_id in range(self.num_layers)}
+        self.decode_cuda_graph_metadata[-1] = {}
         
+        
+        self.forward_wrapper = {layer_id: self.decode_wrappers[layer_id] for layer_id in range(self.num_layers)}
+        self.forward_wrapper[-1] = BatchDecodeWithPagedKVCacheWrapper(
+            self.workspace_buffer,
+            "NHD",
+            use_tensor_cores=True, 
+        )
+
+
     def register_for_attn(self, service: BaseService):
         methods_to_register = ["attn"]
         for method in methods_to_register:
@@ -230,7 +239,6 @@ class Attention(nn.Module, Artifact):
         kv_last_page_lens = torch.ones(
             (seq_lens.shape[0],), device="cuda"
         ).to(torch.int32)  
-        
         
         self.forward_wrapper[layer_id].begin_forward(
             indptr=kv_indptr,
@@ -325,13 +333,13 @@ class Attention(nn.Module, Artifact):
         if context.is_prefill:
             if context.block_tables is not None:
                 k, v = k_cache, v_cache
-            store_q_cache(q, self.q_cache, context.query_slot_mapping, context.query_window_pos, is_prefill=True)
+            # store_q_cache(q, self.q_cache, context.query_slot_mapping, context.query_window_pos, is_prefill=True)
             o = flash_attn_varlen_func(q, k, v,
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
-            store_q_cache(q, self.q_cache, context.query_slot_mapping, is_prefill=False)
+            # store_q_cache(q, self.q_cache, context.query_slot_mapping, is_prefill=False)
             o = self.forward_wrapper[layer_id].forward(q, (self.k_cache, self.v_cache))
         o = o.view(-1, self.num_heads * self.head_dim)
         return o

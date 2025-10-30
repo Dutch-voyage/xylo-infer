@@ -19,7 +19,8 @@ from src.services.nanovllm_v4.utils.context import set_cuda_graph_flag
 
 from src.artifacts.nanovllm_v4.cache_mngr.layerwise import CacheManager
 
-from src.artifacts.nanovllm_v4.cache_mngr.snapKV import SnapKVCluster
+from src.artifacts.nanovllm_v4.cache_mngr.snapKV import SnapKV
+from src.artifacts.nanovllm_v4.cache_mngr.RKV import RKV
 
 from enum import Enum
 
@@ -57,7 +58,7 @@ class ModelRunner(BaseService):
         self.model = Qwen3ForCausalLM(self.attention_backend, hf_config)
         load_model(self.model, config.model)
         
-        self.compressor = SnapKVCluster(window_size=32, max_capacity_prompt=128)
+        self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget)
         
         self.cache_mngr = CacheManager(self.attention_backend, config, self.compressor)
         self.cache_mngr._register_method("init_block_table_after_prefill", self)
@@ -66,7 +67,6 @@ class ModelRunner(BaseService):
         self.cache_mngr._register_method("update_indices_per_layer_capture", self)
         self.cache_mngr._register_method("update_indices_per_layer_replay", self)
 
-        
         self.sampler = Sampler()
         global stage
         stage = RunningStage.WARMUP
@@ -134,7 +134,8 @@ class ModelRunner(BaseService):
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache") and hasattr(module, "q_cache"):
-                self.cache_mngr.read_and_store_cache(module.q_cache, module.k_cache, module.v_cache, layer_id)
+                # self.cache_mngr.read_and_store_cache(module.q_cache, module.k_cache, module.v_cache, layer_id)
+                self.cache_mngr.read_and_store_cache(module.q_cache, module.k_cache, module.v_cache, -1)
                 layer_id += 1
 
     def warmup_model(self):
