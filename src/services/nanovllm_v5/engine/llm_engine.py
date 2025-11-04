@@ -36,9 +36,6 @@ class LLMEngine:
         
         self.scheduler.block_manager._register_method("_deallocate_block", self.model_runner.cache_mngr)
         self.scheduler.block_manager._register_obj("blocks", self.model_runner.cache_mngr)
-        
-        self.model_runner.cache_mngr._register_obj("seq_to_layer_block_table", self.scheduler.block_manager)
-        self.model_runner.cache_mngr._register_obj("num_layers", self.scheduler.block_manager)
                 
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id

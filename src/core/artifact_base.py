@@ -16,6 +16,7 @@ import importlib.util
 import inspect
 import uuid
 
+from collections import  deque
 
 @dataclass
 class ExecutionContext:
@@ -65,10 +66,8 @@ class Artifact(ABC):
             self.registered_methods_to[service.name] = []
         self.registered_methods_to[service.name].append(obj_name)
 
-        if self.name not in service.registered_methods_by.keys():
-            service.registered_methods_by[self.name] = []
-
-        service.registered_methods_by[self.name].append(obj_name)
+        if self.name not in service.registered_by.keys():
+            service.registered_by[self.name] = self
 
         original_method = getattr(self.__class__, obj_name)
 
@@ -82,58 +81,59 @@ class Artifact(ABC):
                 # Create a proxy object that routes attribute access
                 class ArtifactProxy:
                     def __init__(self):
-                        self._artifact_name = self_artifact.name
-
+                        pass
+                    
                     def __getattr__(self, name):
                         # First check if it's a registered method in the service
+                        # assert not (
+                        #     hasattr(self_service, name) and hasattr(self_artifact, name)
+                        # ), f"Attribute name conflict for '{name}' between service and artifact. Please make sure that either {self_service.name} or {self_artifact.name} defines attribute '{name}'."
 
-                        assert not (
-                            hasattr(self_service, name) and hasattr(self_artifact, name)
-                        ), f"Attribute name conflict for '{name}' between service and artifact. Please make sure that either {self_service.name} or {self_artifact.name} defines attribute '{name}'."
-
+                        if hasattr(self_service, name):
+                            return getattr(self_service, name)
+                        cu_artifact = self_artifact
+                        artifact_queue = deque([cu_artifact])
                         
+                        searched_names = set()
                         
-                        if (
-                            name in self_artifact.registered_methods_to[self_service.name].keys()
-                            or name in self_artifact.registered_objs_to[self_service.name].keys()
+                        while (
+                            len(artifact_queue) > 0
                         ):
-                            # print(f"[Proxy] Accessing registered attribute '{name}': {hasattr(self_service, name)}")
-                            if hasattr(self_artifact, name):
-                                return getattr(self_artifact, name)
-                            else:
-                                # print(name, hasattr(self_artifact, name))
-                                # Then check if it's available in the artifact instance
+                            cu_artifact = artifact_queue.popleft()
+                            if cu_artifact.name in searched_names:
                                 raise AttributeError(
-                                    f"'{type(self_artifact).__name__}' object has no attribute '{name}' which is supposed to be registered to '{self_service.name}'"
+                                    f"Found loop in registeration between {searched_names} when searching for attribute '{name}'"
                                 )
-                        else:
-                            if hasattr(self_service, name):
-                                return getattr(self_service, name)
                             else:
-                                raise AttributeError(
-                                    f"'{type(self_service).__name__}' object has no attribute '{name}' or the attribute is not registered from artifact '{self_artifact.name}'"
-                                )
+                                searched_names.add(cu_artifact.name)
+                            if (hasattr(cu_artifact, name)):
+                                return getattr(cu_artifact, name)
+                            if hasattr(cu_artifact, "registered_by"):
+                                artifact_queue.extend(cu_artifact.registered_by)
+
+                        raise AttributeError(
+                            f"'{type(self_service).__name__}' object has no attribute '{name}' or the attribute is not registered from artifacts'"
+                        )
 
                     def __setattr__(self, name, value):
-                        if (
-                            name in self_artifact.registered_methods_to[self_service.name].keys()
-                            or name in self_artifact.registered_objs_to[self_service.name].keys()
+                        # TODO: check if the following logic is right
+                        # if service has the attribute already, set it with the new value
+                        # else if the registered tree of the service has the attribute already, set it with the new value for the corresponding artifact
+                        # else create the attribute for the service
+                        
+                        if hasattr(self_service, name):
+                            setattr(self_service, name, value)
+                        artifact_queue = deque([self_artifact])
+                        while (
+                            len(artifact_queue) > 0
                         ):
-                            if hasattr(self_artifact, name):
-                                setattr(self_artifact, name, value)
-                                return
-                            else:
-                                raise AttributeError(
-                                    f"'{type(self_artifact).__name__}' object has no attribute '{name}' that is supposed to be registered to '{self_service.name}'"
-                                )
-                        else:
-                            if hasattr(self_service, name):
-                                setattr(self_service, name, value)
-                                return
-                            else:
-                                raise AttributeError(
-                                    f"'{type(self_service).__name__}' object has no attribute '{name}' or the attribute is not registered from artifact '{self_artifact.name}'"
-                                )
+                            cu_artifact = artifact_queue.popleft()
+                            if (hasattr(cu_artifact, name)):
+                                return setattr(cu_artifact, name, value)
+                            if hasattr(cu_artifact, "registered_by"):
+                                artifact_queue.extend([art for art_name, art in cu_artifact.registered_by.items()])
+                           
+                        setattr(self_service, name, value)
 
                 # Create the proxy and call the original method
                 proxy = ArtifactProxy()
@@ -157,9 +157,9 @@ class Artifact(ABC):
         if service.name not in self.registered_objs_to.keys():
             self.registered_objs_to[service.name] = []
         self.registered_objs_to[service.name].append(obj_name)
-        if self.name not in service.registered_objs_by.keys():
-            service.registered_objs_by[self.name] = []
-        service.registered_objs_by[self.name].append(obj_name)
+
+        if self.name not in service.registered_by.keys():
+            service.registered_by[self.name] = self
 
         setattr(service, obj_name, getattr(self, obj_name))
 

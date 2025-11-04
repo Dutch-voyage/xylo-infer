@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import numpy as np
 import torch
+import os
 
 class LogCollector:
     def __init__(self):
@@ -16,6 +17,8 @@ class LogCollector:
         self.occupied_pages = []
     
     def save(self, path):
+        if not os.path.exists(path):
+            os.makedirs(path)
         np.save(path + "/baseline.npy", {"occupied_pages": np.array(self.occupied_pages), "time_stamps": np.array(self.time_stamps)})
 
 @dataclass

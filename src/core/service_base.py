@@ -11,9 +11,10 @@ from src.core.artifact_base import Artifact
 class BaseService(Artifact):
     def __init__(self):
         super().__init__()
-        self.registered_methods_by: dict[str, list[str]] = {}  # (artifact_name: [method_names])
-        self.registered_objs_by: dict[str, list[str]] = {}
-    
+        # self.registered_methods_by: dict[str, list[str]] = {}  # (artifact_name: [method_names])
+        # self.registered_objs_by: dict[str, list[str]] = {}
+        self.registered_by: dict[str, Artifact] = {}
+
 
 class AsyncBaseService(BaseService):
     """Base class using aysnc to coordinate different execution logic"""

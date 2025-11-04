@@ -63,6 +63,7 @@ class ModelRunner(BaseService):
         self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget)
         
         self.cache_mngr = CacheManager(self.attention_backend, config, self.compressor)
+                
         self.cache_mngr._register_method("prepare_indices_flashinfer", self)
         self.cache_mngr._register_method("update_indices", self)
         self.cache_mngr._register_method("update_indices_capture", self)
