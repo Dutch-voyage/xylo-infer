@@ -8,11 +8,11 @@ Yet another inference engine friendly for beginners and users.
 
 DIY an inference engine from scratch or adapt from existing ones is difficult. Therefore a good start should make a beginer/developer feel ***"I can add code to some place that should appear in an existing inference engine"***. 
 
-To achieve this, this repo is built upon two concepts: Service and Artifact. For a brief review, refer to document [l1](docs/l1/outline.md). 
+To achieve this, this repo is built upon two concepts: **Service** and **Artifact**. For a brief review, refer to document [l1](docs/l1/outline.md). 
 
 ## About documents
 
-For the rest of the documents should be a brief ideas of how each version implement some function. These documents may also include some interesting observation from some buggy feature. 
+The rest of the documents should include a brief ideas of how each version implement some function. These documents may also include some interesting observation from some buggy feature. 
 
 The versions may not be necessarily consecutive, we may need a tree structure for contents later. 
 
