@@ -3,7 +3,7 @@ from datasets import load_dataset
 import os
 
 def add_template(example):
-    example['prompt'] = example['problem'] + "Please reason step by step, and put your final answer within \\boxed{}."
+    example['prompt'] = [{"role": "user", "content": example['problem'] + "Please reason step by step, and put your final answer within \\boxed{}."}]
     return example
 
 def load_aime_dataset(local_dir, data_source):
