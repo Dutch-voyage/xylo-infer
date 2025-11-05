@@ -109,7 +109,7 @@ class Artifact(ABC):
                             if (hasattr(cu_artifact, name)):
                                 return getattr(cu_artifact, name)
                             if hasattr(cu_artifact, "registered_by"):
-                                artifact_queue.extend(cu_artifact.registered_by)
+                                artifact_queue.extend([art for art_name, art in cu_artifact.registered_by.items()])
 
                         raise AttributeError(
                             f"'{type(self_service).__name__}' object has no attribute '{name}' or the attribute is not registered from artifacts'"
