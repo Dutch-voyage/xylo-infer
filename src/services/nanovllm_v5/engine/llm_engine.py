@@ -19,6 +19,8 @@ class LLMEngine:
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         self.config = config = Config(model, **config_kwargs)
+        if not config.enforce_eager and config.if_log_lse:
+            print("Warning: LSE cannot be logged when cuda graph is enabled.") 
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")
@@ -40,7 +42,7 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         
-        self.cur_step = 0
+        self.cur_step = 1
         
         atexit.register(self.exit)
 
@@ -59,12 +61,13 @@ class LLMEngine:
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
         token_ids = self.model_runner.call("run", seqs, is_prefill)
-        # if self.cur_step % self.config.steps_between_cache_compressions == 0:
-        #     self.model_runner.call("compress")
+        if self.config.if_compress_kvcache and self.cur_step % self.config.steps_between_cache_compressions == 0:
+            self.model_runner.call("compress")
         self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
-        
+        self.cur_step += 1
+                
         return outputs, num_tokens
 
     def is_finished(self):
@@ -101,6 +104,7 @@ class LLMEngine:
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids
             pbar.update(1)
+        self.model_runner.call("save_lse_log")
         self.log_collector.save(self.config.log_path)
         outputs = [outputs[seq_id] for seq_id in sorted(outputs)]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]

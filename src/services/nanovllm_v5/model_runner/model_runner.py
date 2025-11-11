@@ -10,6 +10,7 @@ from .models.qwen3 import Qwen3ForCausalLM
 from .layers.sampler import Sampler
 from ..utils.context import set_context, get_context, reset_context
 from ..utils.loader import load_model
+from ..utils.logging import get_log, reset_log
 
 from src.core.service_base import BaseService
 import itertools
@@ -21,8 +22,11 @@ from src.artifacts.nanovllm_v5.cache_mngr.layerwise import CacheManager
 
 from src.artifacts.nanovllm_v5.cache_mngr.snapKV import SnapKV
 from src.artifacts.nanovllm_v5.cache_mngr.RKV import RKV
+from src.artifacts.nanovllm_v5.cache_mngr.oMerging_v2 import OrthMerging
 
 from src.services.nanovllm_v5.model_runner.models.qwen3 import Qwen3AttentionArtifacts
+
+import os
 
 from enum import Enum
 
@@ -55,16 +59,21 @@ class ModelRunner(BaseService):
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
         
-        self.attention_backend = Qwen3AttentionArtifacts.init_new(self, hf_config)
+        self.attention_backend = Qwen3AttentionArtifacts.init_new(self, config)
         self.attention_backend.register(self)
         self.model = Qwen3ForCausalLM(self.attention_backend, hf_config)
         load_model(self.model, config.model)
+
+        # self.compressor = RKV(window_size=config.query_window_size, budget=config.layer_budget)
+
+        # self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget)
         
-        self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget)
+        self.compressor = OrthMerging(window_size=config.query_window_size, budget=config.layer_budget)
         
         self.cache_mngr = CacheManager(self.attention_backend, config, self.compressor)
-                
+        
         self.cache_mngr._register_method("prepare_indices_flashinfer", self)
+        self.cache_mngr._register_method("read_and_store_cache", self)
         self.cache_mngr._register_method("update_indices", self)
         self.cache_mngr._register_method("update_indices_capture", self)
         self.cache_mngr._register_method("update_indices_replay", self)
@@ -79,9 +88,10 @@ class ModelRunner(BaseService):
         if not self.enforce_eager:
             set_cuda_graph_flag()
             self.capture_cudagraph()
+        reset_log()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
-
+        print("cuda graph captured")
         if self.world_size > 1:
             if rank == 0:
                 self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
@@ -90,6 +100,14 @@ class ModelRunner(BaseService):
                 dist.barrier()
                 self.shm = SharedMemory(name="nanovllm")
                 self.loop()
+
+    def save_lse_log(self):
+        lse = get_log().lse_log
+        print(len(lse))
+        save_path = os.path.join(self.config.log_path, f"lse_log.pt")
+        if not os.path.exists(self.config.log_path):
+            os.makedirs(self.config.log_path)
+        torch.save(lse, save_path)
 
     def exit(self):
         if self.world_size > 1:
@@ -135,7 +153,8 @@ class ModelRunner(BaseService):
     def compress(self):
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache") and hasattr(module, "q_cache"):
-                self.cache_mngr.read_and_store_cache(module.q_cache, module.k_cache, module.v_cache)
+                self.read_and_store_cache(module.q_cache, module.k_cache, module.v_cache)
+        self.cu_seqs[0].block_table = self.cu_seqs[0].block_table[: self.config.layer_budget]
 
     def warmup_model(self):
         torch.cuda.empty_cache()

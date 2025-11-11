@@ -7,8 +7,12 @@ class LogCollector:
     def __init__(self):
         self.occupied_pages: list[int] = []
         self.time_stamps: list[float] = []
+        self.lse: list[torch.Tensor] = []
         # self.discrepancsy: list[torch.Tensor] = []
-    
+
+    def append_lse(self, lse: torch.Tensor):
+        self.lse.append(lse)
+
     def append(self, time_stamp: float, occupied_pages: int):
         self.time_stamps.append(time_stamp)
         self.occupied_pages.append(occupied_pages)
@@ -19,19 +23,29 @@ class LogCollector:
     def save(self, path):
         if not os.path.exists(path):
             os.makedirs(path)
-        np.save(path + "/baseline.npy", {"occupied_pages": np.array(self.occupied_pages), "time_stamps": np.array(self.time_stamps)})
+        np.save(path + "/pages.npy", {"occupied_pages": np.array(self.occupied_pages), "time_stamps": np.array(self.time_stamps)})
 
 @dataclass
 class Log:
     occupied_pages: int = 0
     discrepancy: torch.Tensor = None
+    lse_log: list[torch.Tensor] = None
 
 _LOG = Log()
 
 def get_log():
-    global _LOG
     return _LOG
 
-def set_log(new_log: Log):
+def append_lse_log(lse: torch.Tensor):
     global _LOG
-    _LOG = new_log
+    if _LOG.lse_log is None:
+        _LOG.lse_log = []
+    _LOG.lse_log.append(lse)
+
+def reset_log():
+    global _LOG
+    _LOG = Log()
+    
+def set_log(log: Log):
+    global _LOG
+    _LOG = log

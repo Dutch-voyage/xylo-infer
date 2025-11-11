@@ -109,7 +109,7 @@ class CacheManager(BaseService):
             v_cache=v_cache,
             slot_mapping=slot_mappings_tensor,
         )
-
+        
         key = key.unsqueeze(0)
         value = value.unsqueeze(0)
 
@@ -125,8 +125,6 @@ class CacheManager(BaseService):
         # for single request only
         slot_mappings_list = slot_mappings_tensor.tolist()
         slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
-
-        self.cu_seqs[0].block_table = slot_mappings_list[: key.shape[0]]
     
         store_kvcache(
             key=key,
