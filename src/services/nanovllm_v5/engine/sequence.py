@@ -40,6 +40,7 @@ class Sequence:
         seq.seq_id = next(Sequence.counter)
         seq.status = SequenceStatus.WAITING
         seq.token_ids = copy(token_ids)
+        seq.logits = []
         seq.last_token = token_ids[-1]
         seq.num_tokens = len(seq.token_ids)
         seq.num_prompt_tokens = len(token_ids)
@@ -103,6 +104,9 @@ class Sequence:
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
+    
+    def append_logits(self, logits: list[float]):
+        self.logits.extend(logits)
 
     def __getstate__(self):
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,

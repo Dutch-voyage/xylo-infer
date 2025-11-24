@@ -31,6 +31,7 @@ class SnapKV:
         query_states,
         key_states,
         value_states,
+        *args, 
     ):
         head_dim = query_states.shape[-1]
         kv_cache_len = key_states.shape[-2]
@@ -140,4 +141,7 @@ class SnapKV:
             v_cur = value_states[:, :, -self.window_size :, :]
             key_states = torch.cat([k_past_compress, k_cur], dim=2)
             value_states = torch.cat([v_past_compress, v_cur], dim=2)
-            return key_states, value_states
+            
+            return {"key_states": key_states, 
+                    "value_states": value_states, 
+                   }

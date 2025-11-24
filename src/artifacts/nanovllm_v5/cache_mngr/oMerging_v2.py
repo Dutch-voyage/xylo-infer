@@ -132,7 +132,6 @@ class OrthMerging:
 
         if kv_len < self.budget:
             return key_states, value_states
-        
 
         topk = kv_len - self.budget
         
@@ -147,15 +146,15 @@ class OrthMerging:
             key_states,
         ).mean(dim=1) / math.sqrt(head_dim)
 
-        score = torch.exp(
+        score_exp = torch.exp(
             score - score.amax(dim=-1, keepdim=True)
         )  # shape: (bsz, num_kv_heads, q_len, kv_len)
 
         # option 1: compute kv_len * kv_len matrix, here orthogonal means the the mininum index in this matrix,
 
-        corr_score = score.transpose(
+        corr_score = score_exp.transpose(
             -2, -1
-        ) @ (1.0 / score) # shape: (bsz, num_kv_heads, kv_len, kv_len)
+        ) @ (1.0 / score_exp) # shape: (bsz, num_kv_heads, kv_len, kv_len)
         # get the i, j indices of the topk minimum values in the (-1, -2) dims of the score matrix
         assert bsz == 1
 
@@ -186,47 +185,79 @@ class OrthMerging:
             value_states, 2, j_indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
         )
 
-        score_reduced = score.mean(dim=-2)  # shape: (bsz, num_kv_heads, kv_len)
+        score_reduced = score_exp.mean(dim=-2)  # shape: (bsz, num_kv_heads, kv_len)
 
         score_first = torch.gather(score_reduced, -1, i_indices).unsqueeze(-1)
         score_second = torch.gather(score_reduced, -1, j_indices).unsqueeze(-1)
 
-        k_merged = (score_first / score_second + score_first) * k_first + (score_second / score_second + score_first) * k_second
+        # print(f"[1]: {score_first / (score_second + score_first)}\n")
+        # print(f"[2]: {score_first / (score_first + score_second)}\n")
+        # print(f"[3] : {score_second / (score_second + score_first)}\n")
+        # print(f"[4] : {score_second / (score_first + score_second)}\n")
+        
+        # print("-" * 100)
 
+        k_merged = (score_first / (score_first + score_second)) * k_first + (score_second / (score_second + score_first)) * k_second
+
+        score_kept  = torch.einsum(
+            "b g h l d, b h m d -> b g h l m",
+            query_states,
+            k_kept,
+        ).mean(dim=1) / math.sqrt(head_dim)
+        
         score_merged_first = torch.einsum(
             "b g h l d, b h m d -> b g h l m",
             query_states,
             k_first,
         ).mean(dim=1) / math.sqrt(head_dim)
-
+        
         score_merged_second = torch.einsum(
             "b g h l d, b h m d -> b g h l m",
             query_states,
             k_second,
         ).mean(dim=1) / math.sqrt(head_dim)
         
-        score_merged = score_merged_second + score_merged_first
-        
-        score_merged_first = - torch.gather(score, -1, j_indices.unsqueeze(-2).expand(-1, -1, q_len, -1)) * score_merged
-        
-        score_merged_first = torch.exp(
-            score_merged_first- score.amax(dim=-1, keepdim=True)
-        ).mean(dim=-2).unsqueeze(-1)
-        
-        score_merged_second = - torch.gather(score, -1, i_indices.unsqueeze(-2).expand(-1, -1, q_len, -1)) * score_merged
-        
-        score_merged_second = torch.exp(
-            score_merged_second - score.amax(dim=-1, keepdim=True)
-        ).mean(dim=-2).unsqueeze(-1)
-        
-        print(score_merged_first)
-        print(score_merged_second)
+        # it should be maximum(kept, first, second) however second is ususally larger than first
+        score_merged_second -= torch.maximum(score_kept.amax(dim=-1, keepdim=True), score_merged_second.amax(dim=-1, keepdim=True))
 
-        print("-" * 100)
+        score_merged_first -= torch.maximum(score_kept.amax(dim=-1, keepdim=True), score_merged_second.amax(dim=-1, keepdim=True))
 
-        v_merged = score_merged_first * v_first + score_merged_second * v_second
+        score_merged = torch.einsum(
+            "b g h l d, b h m d -> b g h l m",
+            query_states, 
+            k_merged,
+        ).mean(dim=1) / math.sqrt(head_dim)
 
+        score_merged -= torch.maximum(score_kept.amax(dim=-1, keepdim=True), score_merged.amax(dim=-1, keepdim=True))
+        
+        score_first = torch.exp(
+            score_merged_first - score_merged
+        ).mean(-2).unsqueeze(-1)
+        
+        score_second = torch.exp(
+            score_merged_second - score_merged
+        ).mean(-2).unsqueeze(-1)
+
+        # score_merged = score_merged_first - score_merged_second
+
+        # score_merged_first = score_second.squeeze(-1).unsqueeze(-2) * score_merged
+
+        # score_merged_first = torch.exp(
+        #     score_merged_first
+        # ).mean(-2).unsqueeze(-1)
+
+        # score_merged_second = - score_first.squeeze(-1).unsqueeze(-2) * score_merged
+
+        # score_merged_second = torch.exp(
+        #     score_merged_second
+        # ).mean(-2).unsqueeze(-1)
+                
+        # v_merged = score_first * v_first + score_second * v_second
+
+        v_merged = (score_first / (score_first + score_second)) * v_first + (score_second / (score_second + score_first)) * v_second
         k_final = torch.cat([k_kept, k_merged], dim=2)
         v_final = torch.cat([v_kept, v_merged], dim=2)
 
-        return k_final, v_final
+        return {"key_states": k_final, 
+                "value_states": v_final, 
+                }

@@ -4,6 +4,10 @@ from typing import Iterable
 from .sequence import Sequence
 from ..utils.context import get_context
 
+@dataclasses.dataclass
+class ModelRunnerOutput:
+    token_ids: list[int]
+    logits: torch.Tensor
 
 @dataclasses.dataclass
 class SamplingInfo:

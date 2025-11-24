@@ -1,9 +1,12 @@
 from collections import deque
 
+import torch
+
 from ..config import Config
 from .sequence import Sequence, SequenceStatus
 from src.artifacts.nanovllm_v5.block_mngr.block_manager import BlockManager
 
+from src.services.nanovllm_v5.utils.context import get_context  
 from src.artifacts.nanovllm_v5.block_mngr.query_block_manger import QueryBlockManager
 
 
@@ -68,10 +71,15 @@ class Scheduler:
         self.query_block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
-        for seq, token_id in zip(seqs, token_ids):
+    def postprocess(self, seqs: list[Sequence], token_ids: list[int], logits: torch.Tensor) -> list[bool]:
+        offset = 0
+        for i, (seq, token_id) in enumerate(zip(seqs, token_ids)):
             seq.append_token(token_id)
+            seq.append_logits(
+                logits[offset: (offset:= offset + seq.num_prompt_tokens)].tolist()
+            )
             if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+                
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)
                 self.query_block_manager.deallocate(seq)

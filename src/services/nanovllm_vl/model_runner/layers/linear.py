@@ -96,7 +96,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         super().__init__(input_size, sum(output_sizes), bias=bias)
         
     def pad_or_narrow_weight(self, loaded_weight: torch.Tensor, input_dim: int, start_idx: int, shard_size: int) -> torch.Tensor:
-         # Padding with zeros for special case such as qwen2_5_VL's mlp which is not 8-aligned
+        # Padding with zeros for special case such as qwen2_5_VL's mlp which is not 8-aligned
         valid_size = max(loaded_weight.shape[input_dim] - start_idx, 0)
 
         if valid_size > 0:

@@ -3,6 +3,12 @@ import numpy as np
 import torch
 import os
 
+@dataclass
+class LogitsLog:
+    steps: list[int] = None
+    logits: list[np.ndarray] = None
+    token_ids: list[list[int]] = None
+
 class LogCollector:
     def __init__(self):
         self.occupied_pages: list[int] = []
@@ -30,6 +36,7 @@ class Log:
     occupied_pages: int = 0
     discrepancy: torch.Tensor = None
     lse_log: list[torch.Tensor] = None
+    logits_log: LogitsLog = None
 
 _LOG = Log()
 

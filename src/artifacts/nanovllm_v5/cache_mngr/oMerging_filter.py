@@ -25,9 +25,9 @@ class OrthMerging:
             (num_layers, num_heads, budget + steps_between_compression, max_seq_len)
         ).clone()
         self.cache_pos_to_seq_pos[..., :budget, :budget] = torch.eye(budget)
+        self.layer_to_filtered_mask = {}
 
     def initial_indices(self, seq, layer_id):
-
         self.cache_pos_to_seq_pos[
             layer_id, :,
             -self.steps_between_compression :,
@@ -37,6 +37,7 @@ class OrthMerging:
     def reset_indices(self):
         self.cache_pos_to_seq_pos.fill_(0)
         self.cache_pos_to_seq_pos[..., :self.budget, :self.budget] = torch.eye(self.budget)
+        self.layer_to_filtered_mask = {}
     
     def update_kv(
         self,
@@ -60,7 +61,6 @@ class OrthMerging:
             return key_states, value_states
         
         topk = kv_len - self.budget
-
         assert topk * 2 <= kv_len, "budget too small compared to current kv length"
 
         query_states = rearrange(
@@ -83,13 +83,20 @@ class OrthMerging:
         unselected_mask = torch.ones(
             (bsz, num_kv_heads, kv_len), device=key_states.device, dtype=torch.bool
         )
-        
-        max_indices = score.topk(
+
+        filter_mask = self.layer_to_filtered_mask.get(layer_id, None)
+        if filter_mask is None:
+            filter_mask = torch.zeros(
+                (bsz, num_kv_heads, kv_len), device=key_states.device, dtype=torch.bool
+            )
+            # self.layer_to_filtered_mask[layer_id] = filter_mask
+        filter_mask = filter_mask[:, :, :kv_len]
+        max_indices = (torch.where(~filter_mask, score, -float("inf"))).topk(
             topk, dim=-1
         ).indices  # shape: (bsz, num_kv_heads, topk)
         unselected_mask.scatter_(-1, max_indices, 0)
         min_indices = (
-            (torch.where(unselected_mask, -score, -float("inf")))
+            (torch.where(unselected_mask & (~filter_mask), -score, -float("inf")))
             .topk(topk, dim=-1)
             .indices
         )  #
@@ -156,6 +163,13 @@ class OrthMerging:
             ),
         )
         self.cache_pos_to_seq_pos[layer_id] = new_cache_pos_to_seq_pos
+        
+        maxindices_seq_pos_per_cache = score.topk(self.filter_topk, dim=-1).indices
+        filter_mask = torch.zeros(
+            (bsz, num_kv_heads, self.budget + self.steps_between_compression), device=key_states.device, dtype=torch.bool
+        )
+        filter_mask.scatter_(-1, maxindices_seq_pos_per_cache, 1)
+        self.layer_to_filtered_mask[layer_id] = filter_mask
 
         return {"key_states": k_final, 
                 "value_states": v_final, 

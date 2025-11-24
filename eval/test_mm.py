@@ -1,28 +1,47 @@
 import torch
 import numpy as np
-from src.services.nanovllm_v5 import LLM, SamplingParams
+from src.services.nanovllm_vl import LLM, SamplingParams
 from transformers import AutoTokenizer
 import os
 import datasets
 from torch.utils.data import DataLoader, Dataset
-
+import ast
+import re
 
 class Dataset_with_template(Dataset):
     def __init__(self, local_dir, data_source, tokenizer):
         self.dataframe = datasets.load_dataset(
-            "parquet",
-            data_files=os.path.join(local_dir, data_source + ".parquet"),
+            "json",
+            data_files=os.path.join(local_dir, data_source + ".json"),
             split="train",
         )
         self.tokenizer = tokenizer
 
     def __getitem__(self, idx):
         row_dict = self.dataframe[idx]
-        prompt = row_dict["prompt"]
+        question = row_dict["question"]
+
+        options = ast.literal_eval(row_dict["options"])
+
+        for i, option in enumerate(options):
+            question += f"\nOption {chr(65 + i)}: {option}"
+        
+        prompt = question + "\nPlease select the correct answer from the options above."
+        
+        prompt = [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": prompt
+                }, 
+                {"type": "image", "image_url": row_dict["image_paths"][0]}
+            ]
+        }]
+        
         raw_prompt = self.tokenizer.apply_chat_template(
             prompt, add_generation_prompt=True, tokenize=False
         )
-
         row_dict["raw_prompt"] = raw_prompt
         return row_dict
 
@@ -30,46 +49,33 @@ class Dataset_with_template(Dataset):
         return len(self.dataframe)
 
 
-def generate_answer(local_dir="../datasets", model_path="/home/yyx/models/Qwen3-4B"):
+def generate_answer(local_dir="./datasets", model_path="/home/yyx/models/Qwen2.5-VL-3B-Instruct"):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    dataset = Dataset_with_template(local_dir, "aime24", tokenizer)
+    data_source = "mmmu_json/Accounting/"
+    dataset = Dataset_with_template(local_dir, data_source + "validation", tokenizer)
+
 
     llm = LLM(
         model_path,
         enforce_eager=True,
         tensor_parallel_size=1,
-        if_log_lse=False,
-        if_compress_kvcache=True,
-        compress_method="snapkv",
-        layer_budget=512,
-        query_window_size=8,
-        steps_between_cache_compressions=32,
-        log_path="./snapkv_logs",
     )
-    # sampling_params = SamplingParams(temperature=0.6 ,top_k=20, top_p=0.95, max_tokens=8192)
-    sampling_params = SamplingParams(temperature=-1, max_tokens=2048)
+    sampling_params = SamplingParams(temperature=0.6, max_tokens=128)
     # model = AutoModelForCausalLM.from_pretrained(model_path).to("cuda")
 
     sample = dataset[5]
     prompt = sample["raw_prompt"]
+    image_data = [os.path.join(local_dir, data_source, image_path) for image_path in sample["image_paths"] if image_path is not None]
 
     input_ids = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-    outputs = llm.generate([prompt], sampling_params, )
+    outputs = llm.generate([prompt], sampling_params, image_data=[image_data])
 
     output_ids = outputs[0]["token_ids"]
-    
-    # log_steps=list(range(512 + 32 - len(input_ids), 2048 - 33, 32))
-    # dump_record = []
-    # for step in log_steps:
-    #     dump_record.append({"token_ids": input_ids.tolist() + output_ids[: step], "output_ids": output_ids[step: step + 33], "logits": outputs[0]["logits"][len(input_ids) + step:len(input_ids) + step + 32]})
-    # np.save(f"./no_compress_logs/logits_for_kl.npy", dump_record)
-    
-    print(f"total input tokens {len(input_ids)}")
     print(f"total output tokens {len(output_ids)}")
-    print(len(outputs[0]["logits"]))
+
     all_text = prompt + outputs[0]["text"]
     # generated_text = outputs[0]["text"]
-    with open("aime_5_answer_snapkv", "w") as f:
+    with open("test_mm", "w") as f:
         f.write(all_text)
 
 

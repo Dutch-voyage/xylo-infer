@@ -20,7 +20,9 @@ class Config:
     layer_budget: int = 128 + 1024
     num_kvcache_blocks: int = -1
     if_compress_kvcache: bool = False
+    compress_method: str = "oMerge"
     if_log_lse: bool = False
+    return_logits:  bool = False
 
     steps_between_cache_compressions: int = 128
 
