@@ -1,4 +1,4 @@
-from src.services.nanovllm_v5 import LLM, SamplingParams
+from src.services.nanovllm_v6 import LLM, SamplingParams
 
 import numpy as np
 import torch

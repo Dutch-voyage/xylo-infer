@@ -6,6 +6,10 @@ import os
 import datasets
 from torch.utils.data import DataLoader, Dataset
 
+from .utils import evaluate
+
+
+temperature = 0.6
 
 class Dataset_with_template(Dataset):
     def __init__(self, local_dir, data_source, tokenizer):
@@ -22,7 +26,6 @@ class Dataset_with_template(Dataset):
         raw_prompt = self.tokenizer.apply_chat_template(
             prompt, add_generation_prompt=True, tokenize=False
         )
-
         row_dict["raw_prompt"] = raw_prompt
         return row_dict
 
@@ -30,42 +33,30 @@ class Dataset_with_template(Dataset):
         return len(self.dataframe)
 
 
-def generate_answer(local_dir="./datasets", model_path="/home/yyx/models/Qwen3-4B"):
+def generate_answer(local_dir="datasets", model_path="/home/yyx/models/Qwen3-4B"):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    dataset = Dataset_with_template(local_dir, "reasoning_table/all_with_math", tokenizer)
-    llm = LLM(
-        model_path,
-        enforce_eager=True,
-        tensor_parallel_size=1,
-        if_log_lse=False,
-        if_compress_kvcache=True,
-        compress_method="snapkv",
-        layer_budget=512,
-        query_window_size=8,
-        steps_between_cache_compressions=32,
-        log_path="./table_snapkv_logs",
-    )
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=1024)
+    llm = LLM(model_path, enforce_eager=False, tensor_parallel_size=1)
+    # sampling_params = SamplingParams(temperature=0.6 ,top_k=20, top_p=0.95, max_tokens=1024)
+    # temperature < 0 for greedy_sampling
+    sampling_params = SamplingParams(temperature=-1, max_tokens=1024)
     # model = AutoModelForCausalLM.from_pretrained(model_path).to("cuda")
-
-    sample = dataset[5]
-    prompt = sample["raw_prompt"]
-
-    input_ids = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-    outputs = llm.generate([prompt], sampling_params)
-
-    output_ids = outputs[0]["token_ids"]
+    dataset = Dataset_with_template(local_dir, "aime_2024", tokenizer)
+    
+    prompts = [dataset[5]["raw_prompt"]]
+    outputs = llm.generate(prompts, sampling_params)
+    input_ids = tokenizer(prompts, return_tensors="pt").input_ids[0]
+    output_ids = tokenizer(outputs[0]["text"], return_tensors="pt").input_ids[0]
+    print(f"total input tokens {len(input_ids)}")
     print(f"total output tokens {len(output_ids)}")
-
-    all_text = prompt + outputs[0]["text"]
+    all_text = prompts[0] + outputs[0]["text"]
     # generated_text = outputs[0]["text"]
-    with open("test_table_snapkv", "w") as f:
+    with open("aime_5_answer_test", "w") as f:
         f.write(all_text)
 
+    
 
 def main():
     generate_answer()
-
 
 if __name__ == "__main__":
     main()

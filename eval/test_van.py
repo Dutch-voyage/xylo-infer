@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from src.services.nanovllm_vl import LLM, SamplingParams
+from src.services.nanovllm_v6 import LLM, SamplingParams
 from transformers import AutoTokenizer
 import os
 import datasets
@@ -30,30 +30,48 @@ class Dataset_with_template(Dataset):
         return len(self.dataframe)
 
 
-def generate_answer(local_dir="../datasets", model_path="/home/yyx/models/Qwen2.5-3B-Instruct"):
+def generate_answer(local_dir="./datasets", model_path="/home/yyx/models/Qwen3-4B"):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     dataset = Dataset_with_template(local_dir, "aime24", tokenizer)
-
+    torch.set_warn_always(False)
     llm = LLM(
         model_path,
         enforce_eager=True,
         tensor_parallel_size=1,
+        if_log_lse=False,
+        if_log_num_topp=False, 
+        if_compress_kvcache=False,
+        compress_method="snapkv",
+        layer_budget=512,
+        query_window_size=32,
+        steps_between_cache_compressions=32,
+        log_path="./raw_logs",
+        p_attn=1.0
     )
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=128)
+    # sampling_params = SamplingParams(temperature=0.6 ,top_k=20, top_p=0.95, max_tokens=8192)
+    sampling_params = SamplingParams(temperature=-1, max_tokens=512)
     # model = AutoModelForCausalLM.from_pretrained(model_path).to("cuda")
 
     sample = dataset[5]
     prompt = sample["raw_prompt"]
 
     input_ids = tokenizer(prompt, return_tensors="pt")["input_ids"][0]
-    outputs = llm.generate([prompt], sampling_params)
+    outputs = llm.generate([prompt], sampling_params, )
 
     output_ids = outputs[0]["token_ids"]
+    
+    # log_steps=list(range(512 + 32 - len(input_ids), 2048 - 33, 32))
+    # dump_record = []
+    # for step in log_steps:
+    #     dump_record.append({"token_ids": input_ids.tolist() + output_ids[: step], "output_ids": output_ids[step: step + 33], "logits": outputs[0]["logits"][len(input_ids) + step:len(input_ids) + step + 32]})
+    # np.save(f"./no_compress_logs/logits_for_kl.npy", dump_record)
+    
+    print(f"total input tokens {len(input_ids)}")
     print(f"total output tokens {len(output_ids)}")
-
+    # print(len(outputs[0]["logits"]))
     all_text = prompt + outputs[0]["text"]
     # generated_text = outputs[0]["text"]
-    with open("test_van", "w") as f:
+    with open("aime_5_answer_snapkv", "w") as f:
         f.write(all_text)
 
 
@@ -62,4 +80,5 @@ def main():
 
 
 if __name__ == "__main__":
+    torch.set_printoptions(profile="full")
     main()
