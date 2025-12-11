@@ -104,6 +104,8 @@ class Attention(nn.Module, Artifact):
             use_tensor_cores=True, 
         )
         
+        self.forward_wrapper = self.decode_wrapper
+        
         self.decode_cuda_graph_metadata = {}
                
     def register_for_attn(self, service: BaseService):

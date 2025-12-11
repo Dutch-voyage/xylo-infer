@@ -26,6 +26,7 @@ class Context:
 
 _CONTEXT = Context()
 
+
 def get_context():
     return _CONTEXT
 

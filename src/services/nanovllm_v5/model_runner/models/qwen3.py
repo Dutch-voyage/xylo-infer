@@ -36,9 +36,9 @@ class Qwen3AttentionArtifacts:
     ):
         
         tp_size = dist.get_world_size()
-        num_heads = config.num_attention_heads // tp_size
-        num_kv_heads = config.num_key_value_heads // tp_size
-        head_dim = config.head_dim
+        num_heads = config.hf_config.num_attention_heads // tp_size
+        num_kv_heads = config.hf_config.num_key_value_heads // tp_size
+        head_dim = config.hf_config.head_dim
         scaling = head_dim**-0.5
         return cls(
             attention=Attention(
@@ -47,6 +47,7 @@ class Qwen3AttentionArtifacts:
                 head_dim,
                 scaling,
                 num_kv_heads,
+                config.if_log_lse,
             )
         )
 

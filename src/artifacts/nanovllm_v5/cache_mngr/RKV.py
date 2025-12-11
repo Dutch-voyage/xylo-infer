@@ -11,8 +11,8 @@ class RKV:
         budget=128,
         window_size=8,
         kernel_size=7,
-        mix_lambda=0.07,
-        retain_ratio=0.1,
+        mix_lambda=0.03,
+        retain_ratio=0.2,
         retain_direction="last",
         record_kept_token_indices=False,
         **kwargs,
@@ -39,12 +39,16 @@ class RKV:
         query_states,
         key_states,
         value_states,
+        *args, 
     ):
         head_dim = query_states.shape[-1]
         kv_cache_len = key_states.shape[-2]
 
         if kv_cache_len < self.budget:
-            return key_states, value_states
+            return {
+                "key_states": key_states, 
+                "value_states": value_states,
+            }
         else:
             attn_weights = compute_attention_scores(query_states, key_states)
 
@@ -57,6 +61,7 @@ class RKV:
                 .mean(dim=-2)
                 .to(query_states.dtype)
             )
+            
             # TODO: Softmax then reduce head
 
             attn_cache = F.max_pool1d(
@@ -75,8 +80,6 @@ class RKV:
             final_score = attn_cache * self.mix_lambda - similarity_cos * (
                 1 - self.mix_lambda
             )
-
-            
 
             # shape: (bsz, num_kv_heads, budget - window_size)
             indices = final_score.topk(self.budget - self.window_size, dim=-1).indices
@@ -177,4 +180,6 @@ class RKV:
             v_cur = value_states[:, :, -self.window_size :, :]
             key_states = torch.cat([k_past_compress, k_cur], dim=2)
             value_states = torch.cat([v_past_compress, v_cur], dim=2)
-            return key_states, value_states
+            
+            return {"key_states": key_states, 
+                    "value_states": value_states}

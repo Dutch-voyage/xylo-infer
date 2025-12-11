@@ -14,7 +14,7 @@ class Block:
         self.block_id = block_id
         self.token_ids = []
 
-    def update(self, hash: int, token_ids: list[int]):
+    def update(self, token_ids: list[int]):
         self.token_ids = token_ids
 
     def reset(self):

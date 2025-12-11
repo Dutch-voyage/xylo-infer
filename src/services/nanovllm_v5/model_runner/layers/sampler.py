@@ -9,6 +9,7 @@ from sgl_kernel import (
 )
 
 from ...engine.io_struct import SamplingInfo
+from src.services.nanovllm_v5.utils.context import get_context
 
 class Sampler(nn.Module):
 
@@ -26,6 +27,10 @@ class Sampler(nn.Module):
     #     return torch.where(temperatures == 0, greedy_tokens, sample_tokens)
     
     def forward(self, logits: torch.Tensor, sampling_infos: SamplingInfo):
+        context = get_context()
+        if context.is_prefill:
+            last_indices = context.cu_seqlens_q[1:] - 1
+            logits = logits[last_indices].contiguous()
         if sampling_infos.is_greedy_sampling:
             return logits.argmax(dim=-1)
         logits = logits.float().div_(sampling_infos.temperatures[:, None])

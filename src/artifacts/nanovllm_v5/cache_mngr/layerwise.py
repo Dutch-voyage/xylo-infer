@@ -27,8 +27,6 @@ class CacheManager(BaseService):
 
     def __init__(self, attention_backend: Artifact, config, compressor=None):
         super().__init__()
-
-        self.cu_seqs: list[Sequence]
     
         attention_backend.register(self)
 
@@ -40,7 +38,7 @@ class CacheManager(BaseService):
 
         self.compressor = compressor
 
-    def prepare_indices_flashinfer(self, seqs):
+    def log_page_indices(self, seqs):
         # move to model runner before capturing cuda graph
         self.cu_seqs = seqs
         occupied_pages = 0
@@ -76,16 +74,67 @@ class CacheManager(BaseService):
             self.seq_lens,
             self.page_indices, 
         )
-        
-    def read_and_store_cache(self, q_cache, k_cache, v_cache):
+    
+    def read_and_store_cache_iterative(self, q_cache, k_cache, v_cache, layer_id):
+        total_steps = (len(self.cu_seqs[0].block_table) - self.compressor.budget) // self.config.steps_between_cache_compressions + 1
+        for i in range(total_steps):
+            start = i * self.config.steps_between_cache_compressions + self.compressor.budget
+            end = min(start + self.config.steps_between_cache_compressions, len(self.cu_seqs[0].block_table))
+            slot_mappings = self.cu_seqs[0].block_table[:self.compressor.budget] + self.cu_seqs[0].block_table[start:end]
+            assert len(self.cu_seqs) == 1, "Currently only support single request"
+
+            slot_mappings_tensor = torch.tensor(slot_mappings, device="cuda").to(
+                torch.int32
+            )
+            
+            query_slot_mapping = [self.cu_seqs[0].query_block_id]
+
+            query_slot_mapping_tensor = torch.tensor(query_slot_mapping, device="cuda").to(
+                torch.int32
+            )
+
+            query = read_q_cache(
+                q_cache=q_cache,
+                query_slot_mapping=query_slot_mapping_tensor,
+            )
+
+            key, value = read_kvcache(
+                k_cache=k_cache,
+                v_cache=v_cache,
+                slot_mapping=slot_mappings_tensor,
+            )
+            
+            key = key.unsqueeze(0)
+            value = value.unsqueeze(0)
+
+            updated_k, updated_v = self.compressor.update_kv(
+                query.transpose(1, 2),
+                key.transpose(1, 2),
+                value.transpose(1, 2),
+                self.cu_seqs[0],
+                layer_id, 
+            )
+
+            key = updated_k.transpose(1, 2).squeeze(0).contiguous()
+            value = updated_v.transpose(1, 2).squeeze(0).contiguous()
+
+            slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
+            
+            store_kvcache(
+                key=key,
+                value=value,
+                k_cache=k_cache,
+                v_cache=v_cache,
+                slot_mapping=slot_mappings_tensor,
+            )
+    
+    def read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
         """
         option 1: per-sequence handling
 
         option 2: like flashinfer's layout, handling with packed indices,
         """
-        slot_mappings = []
-        for seq in self.cu_seqs:
-            slot_mappings.extend(seq.block_table)
+        slot_mappings = self.cu_seqs[0].block_table
 
         assert len(self.cu_seqs) == 1, "Currently only support single request"
 
@@ -93,7 +142,7 @@ class CacheManager(BaseService):
             torch.int32
         )
         
-        query_slot_mapping = [seq.query_block_id for seq in self.cu_seqs]
+        query_slot_mapping = [self.cu_seqs[0].query_block_id]
 
         query_slot_mapping_tensor = torch.tensor(query_slot_mapping, device="cuda").to(
             torch.int32
@@ -109,24 +158,26 @@ class CacheManager(BaseService):
             v_cache=v_cache,
             slot_mapping=slot_mappings_tensor,
         )
-
+        
         key = key.unsqueeze(0)
         value = value.unsqueeze(0)
 
-        updated_k, updated_v = self.compressor.update_kv(
+        ret = self.compressor.update_kv(
             query.transpose(1, 2),
             key.transpose(1, 2),
             value.transpose(1, 2),
+            self.cu_seqs[0],
+            layer_id, 
         )
+        
+        updated_k = ret["key_states"]
+        updated_v = ret["value_states"]
 
         key = updated_k.transpose(1, 2).squeeze(0).contiguous()
         value = updated_v.transpose(1, 2).squeeze(0).contiguous()
+        
 
-        # for single request only
-        slot_mappings_list = slot_mappings_tensor.tolist()
         slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
-
-        self.cu_seqs[0].block_table = slot_mappings_list[: key.shape[0]]
     
         store_kvcache(
             key=key,

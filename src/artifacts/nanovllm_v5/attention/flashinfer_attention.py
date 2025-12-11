@@ -11,6 +11,7 @@ from typing import Optional, Union
 
 
 from src.services.nanovllm_v5.utils.context import get_context
+from src.services.nanovllm_v5.utils.logging import append_lse_log
 from src.services.nanovllm_v5.engine.sequence import Sequence
 
 from src.core.artifact_base import Artifact
@@ -170,6 +171,7 @@ class Attention(nn.Module, Artifact):
         head_dim,
         scale,
         num_kv_heads,
+        if_log_lse=False,
     ):
         super().__init__()
         Artifact.__init__(self)
@@ -177,7 +179,7 @@ class Attention(nn.Module, Artifact):
         self.head_dim = head_dim
         self.scale = scale
         self.num_kv_heads = num_kv_heads
-
+        self.if_log_lse = if_log_lse
         global global_workspace_buffer
         if global_workspace_buffer is None:
             global_workspace_buffer = torch.empty(
@@ -218,8 +220,7 @@ class Attention(nn.Module, Artifact):
         self.forward_wrapper = self.decode_wrapper
         
         self.decode_cuda_graph_metadata = {}
-
-
+        
     def register_for_attn(self, service: BaseService):
         methods_to_register = ["attn"]
         for method in methods_to_register:
@@ -336,6 +337,10 @@ class Attention(nn.Module, Artifact):
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
         else:    # decode
             store_q_cache(q, self.q_cache, context.query_slot_mapping, is_prefill=False)
-            o = self.forward_wrapper.forward(q, (self.k_cache, self.v_cache))
+            if self.if_log_lse:
+                o, lse = self.forward_wrapper.forward_return_lse(q, (k_cache, v_cache))
+                append_lse_log(lse)
+            else:
+                o = self.forward_wrapper.forward(q, (self.k_cache, self.v_cache))
         o = o.view(-1, self.num_heads * self.head_dim)
         return o
