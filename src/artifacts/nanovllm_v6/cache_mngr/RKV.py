@@ -4,7 +4,6 @@ import torch.nn.functional as F
 
 from .utils import cal_similarity, compute_attention_scores
 
-
 class RKV:
     def __init__(
         self,

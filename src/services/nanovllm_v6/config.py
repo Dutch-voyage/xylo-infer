@@ -10,7 +10,7 @@ class Config:
     max_num_batched_tokens: int = 262144
     max_num_seqs: int = 128
     max_model_len: int = 32768
-    gpu_memory_utilization: float = 0.7
+    gpu_memory_utilization: float = 0.3
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
@@ -24,7 +24,7 @@ class Config:
     if_log_lse: bool = False
     if_log_num_topp: bool = False
     return_logits:  bool = False
-    p_attn: float = 0.99
+    p_attn: float = 0.90
 
     steps_between_cache_compressions: int = 128
 

@@ -1,18 +1,18 @@
 from src.core.artifact_base import Artifact
 from src.core.service_base import BaseService
 
-from ..attention.flashinfer_attention import (
+from ..attention.flashinfer_attention_headflatten import (
     Attention,
     store_kvcache,
     read_kvcache,
     read_q_cache,
 )
-from src.services.nanovllm_v5.engine.sequence import Sequence
+from src.services.nanovllm_v6.engine.sequence import Sequence
 import torch
 
 import itertools
 
-from src.services.nanovllm_v5.utils.logging import get_log, set_log
+from src.services.nanovllm_v6.utils.logging import get_log, set_log
 # all implemntation here
 
 

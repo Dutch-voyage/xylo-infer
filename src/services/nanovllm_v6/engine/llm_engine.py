@@ -9,10 +9,10 @@ from ..config import Config
 from ..sampling_params import SamplingParams
 from .sequence import Sequence
 from .scheduler import Scheduler
-from src.services.nanovllm_v5.model_runner import ModelRunner
+from src.services.nanovllm_v6.model_runner import ModelRunner
 
-from src.services.nanovllm_v5.utils.logging import get_log, set_log, LogCollector, LogitsLog
-from src.services.nanovllm_v5.engine.io_struct import ModelRunnerOutput
+from src.services.nanovllm_v6.utils.logging import get_log, set_log, LogCollector, LogitsLog
+from src.services.nanovllm_v6.engine.io_struct import ModelRunnerOutput
 import numpy as np
 
 class LLMEngine:
@@ -114,12 +114,10 @@ class LLMEngine:
             for seq_id, token_ids, logits in output:
                 outputs[seq_id] = (token_ids, logits)
             pbar.update(1)
-        if self.config.if_log_lse:
-            self.model_runner.call("save_lse_log")
-        if self.config.if_log_num_topp:
-            self.model_runner.call("save_num_topp")
+        self.model_runner.call("save_lse_log")
+        self.model_runner.call("save_num_topp")
         self.model_runner.call("reset")
-        self.cur_step = 32
+        # self.cur_step = 32
         
         self.log_collector.save(self.config.log_path)
         outputs = [outputs[seq_id] for seq_id in sorted(outputs)]

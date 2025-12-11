@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .utils import compute_attention_scores
-from src.services.nanovllm_v5.utils.logging import append_num_topp, append_selected_indices
+from src.services.nanovllm_v6.utils.logging import append_num_topp, append_selected_indices, append_item_to_log
 from flashinfer.sampling import top_p_renorm_probs
 import triton 
 import triton.language as tl
@@ -136,6 +136,7 @@ class SnapKV:
         *args, 
     ):
         head_dim = query_states.shape[-1]
+        q_cache_len = query_states.shape[-2]    
         kv_cache_len = key_states.shape[-2]
 
         if kv_cache_len < self.budget:
@@ -144,8 +145,7 @@ class SnapKV:
                 "value_states": value_states,
             }
         else:
-            attn_weights = compute_attention_scores(query_states, key_states)
-
+            attn_weights = compute_attention_scores(query_states, key_states)            
             attn_weights_sum = (
                 nn.functional.softmax(
                     attn_weights[:, :, -self.window_size :, : -self.window_size],
@@ -157,12 +157,29 @@ class SnapKV:
             )
 
             attn_cache = attn_weights_sum
-            # attn_cache = F.max_pool1d(
-            #     attn_weights_sum,
-            #     kernel_size=self.kernel_size,
-            #     padding=self.kernel_size // 2,
-            #     stride=1,
-            # )
+
+            attn_cache_max_pool = F.max_pool1d(
+                attn_weights_sum,
+                kernel_size=self.kernel_size,
+                padding=self.kernel_size // 2,
+                stride=1,
+            )
+            
+            from matplotlib import pyplot as plt
+            import numpy as np
+            import os 
+            savepath = "./figs/attn_compare/"
+            os.makedirs(savepath, exist_ok=True)
+            for head_id in range(8):
+                plt.figure(figsize=(15, 5))
+                full_attn = attn_cache[0, head_id, :].float().cpu().numpy()
+                max_pool_attn = attn_cache_max_pool[0, head_id, :].float().cpu().numpy()
+                plt.plot(full_attn, label="full_attn")
+                plt.plot(max_pool_attn, label="max_pool_attn")
+                plt.legend()
+                plt.savefig(f"{savepath}layer_0_head_{head_id}.png")
+                plt.close()
+            assert False
             
             # shape: (bsz, num_kv_heads, budget - window_size)
             # indices = attn_cache.topk(self.budget - self.window_size, dim=-1).indices
@@ -171,15 +188,16 @@ class SnapKV:
             
             selected_indices = torch.vmap(partial(torch.nonzero_static, size=attn_cache.shape[-1]), in_dims=(0,))(attn_topp_normed).squeeze(-1)
             # torch.set_printoptions(threshold=10000)
-
-            # print(selected_indices)
             
             out_key_states, out_value_states, num_selected = gather_from_topp(
                 selected_indices,
                 key_states[:, :, : -self.window_size, :],
                 value_states[:, :, : -self.window_size, :],
             )
-            
+                        
+            lse = torch.logsumexp(compute_attention_scores(query_states, out_key_states, pooling="none").squeeze(0), dim=-1).view(-1, q_cache_len).transpose(0, 1) # [window_len, num_heads]
+
+            append_item_to_log("lse_topp_log", lse.float().detach().cpu())
             append_num_topp(num_selected)
             append_selected_indices(selected_indices)
             

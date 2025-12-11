@@ -1,18 +1,19 @@
 from src.core.artifact_base import Artifact
 from src.core.service_base import BaseService
 
-from ..attention.flashinfer_attention import (
+from ..attention.flashinfer_attention_headflatten import (
     Attention,
     store_kvcache,
     read_kvcache,
     read_q_cache,
 )
-from src.services.nanovllm_v5.engine.sequence import Sequence
+from src.services.nanovllm_v6.engine.sequence import Sequence
 import torch
 
 import itertools
 
-from src.services.nanovllm_v5.utils.logging import get_log, set_log
+from src.services.nanovllm_v6.utils.context import get_context
+from src.services.nanovllm_v6.utils.logging import get_log, set_log
 # all implemntation here
 
 
@@ -38,28 +39,34 @@ class CacheManager(BaseService):
 
         self.compressor = compressor
 
-    def log_page_indices(self, seqs):
+    def arrange_page_indices(self, seqs):
         # move to model runner before capturing cuda graph
         self.cu_seqs = seqs
-        occupied_pages = 0
+        seq_lens = torch.tensor(
+            [0] + [len(seq.block_table) for seq in self.cu_seqs]
+        ).to(torch.int32)
         cu_page_indices = torch.tensor(
             list(itertools.chain(*[seq.block_table for seq in seqs]))
         ).to(torch.int32)
-        occupied_pages = cu_page_indices.shape[0]
-        seq_lens = torch.tensor(
-            [len(seq.block_table) for seq in self.cu_seqs]
-        ).to(torch.int32)
+        
         self.page_indices = cu_page_indices
         self.seq_lens = seq_lens
+        self.log_occupied_pages(cu_page_indices.shape[0])
+    
+    def log_occupied_pages(self, occupied_pages):
         log = get_log()
         log.occupied_pages = occupied_pages
         set_log(log)
         
     def update_indices(self):
-        self.prepare_metadata_for_attn(
-            self.seq_lens,
-            self.page_indices, 
-        )
+        if get_context().is_prefill:
+            self.prepare_metadata_for_attn_prefill(
+                self.cu_seqs
+            )
+        else:
+            self.prepare_metadata_for_attn_decode(
+                self.cu_seqs
+            )
 
     def update_indices_capture(self, bs: int):
         self.init_forward_metadata_capture_cuda_graph(
@@ -152,7 +159,7 @@ class CacheManager(BaseService):
             q_cache=q_cache,
             query_slot_mapping=query_slot_mapping_tensor,
         )
-
+        
         key, value = read_kvcache(
             k_cache=k_cache,
             v_cache=v_cache,
@@ -176,7 +183,6 @@ class CacheManager(BaseService):
         key = updated_k.transpose(1, 2).squeeze(0).contiguous()
         value = updated_v.transpose(1, 2).squeeze(0).contiguous()
         
-
         slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
     
         store_kvcache(

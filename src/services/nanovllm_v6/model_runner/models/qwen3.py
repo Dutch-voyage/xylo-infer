@@ -12,12 +12,16 @@ from ..layers.linear import (
 )
 from ..layers.rotary_embedding import get_rope
 from ..layers.embed_head import VocabParallelEmbedding, ParallelLMHead
-from src.services.nanovllm_v2_5.engine.sequence import Sequence
-from src.artifacts.nanovllm_v2_5.attention.flashinfer_attention import Attention
+from src.services.nanovllm_v6.engine.sequence import Sequence
+from src.artifacts.nanovllm_v6.cache_mngr.layerwise import CacheManager
 
 from src.core.service_base import BaseService
 from src.core.artifact_base import Artifact
 import dataclasses
+
+from src.services.nanovllm_v6.utils.context import get_cuda_graph_flag
+
+from src.artifacts.nanovllm_v6.attention.flashinfer_attention_headflatten import Attention
 
 
 @dataclasses.dataclass
@@ -30,11 +34,10 @@ class Qwen3AttentionArtifacts:
         model_runner, 
         config
     ):
-        
         tp_size = dist.get_world_size()
-        num_heads = config.num_attention_heads // tp_size
-        num_kv_heads = config.num_key_value_heads // tp_size
-        head_dim = config.head_dim
+        num_heads = config.hf_config.num_attention_heads // tp_size
+        num_kv_heads = config.hf_config.num_key_value_heads // tp_size
+        head_dim = config.hf_config.head_dim
         scaling = head_dim**-0.5
         return cls(
             attention=Attention(
@@ -49,23 +52,23 @@ class Qwen3AttentionArtifacts:
     def register(self, service: BaseService):
         if "attention" in service.name.lower():
             self.attention._register_method("attn", service)
-        if "runner" in service.name.lower():    
+        if "cachemanager" in service.name.lower():
+            self.attention._register_method("prepare_metadata_for_attn_prefill", service)
+            self.attention._register_method("prepare_metadata_for_attn_decode", service)
             self.attention._register_method("init_forward_metadata_capture_cuda_graph", service)
             self.attention._register_method("init_forward_metadata_replay_cuda_graph", service)
-            self.attention._register_method("update_indices", service)
-            self.attention._register_method("prepare_metadata_for_attn_decode", service)
-            self.attention._register_method("prepare_metadata_for_attn_prefill", service)
+            self.attention._register_obj("decode_cuda_graph_metadata", service)
 
 
 class Qwen3Attention(nn.Module, BaseService):
-
     @property
     def name(self):
-        return "Qwen3Attention"
+        return f"Qwen3Attention_layer_{self.layer_id}"
     
     def __init__(
         self,
-        attention_backend, 
+        layer_id: int, 
+        attention_backend: any, 
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -78,8 +81,9 @@ class Qwen3Attention(nn.Module, BaseService):
     ) -> None:
         super().__init__()
         BaseService.__init__(self)
+        self.layer_id = layer_id
         
-        self.k_cache = self.v_cache = torch.tensor([])
+        self.k_cache = self.v_cache = self.q_cache = torch.tensor([])
         
         tp_size = dist.get_world_size()
         self.total_num_heads = num_heads
@@ -92,16 +96,9 @@ class Qwen3Attention(nn.Module, BaseService):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-
-        # self.artifacts = Qwen3AttentionArtifacts.init_new(
-        #     self.num_heads,
-        #     self.head_dim,
-        #     self.scaling,
-        #     self.num_kv_heads,
-        # )
-        attention_backend.register(self)
-        # self.artifacts.register(self)
         
+        attention_backend.register(self)
+                
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -139,6 +136,7 @@ class Qwen3Attention(nn.Module, BaseService):
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
+        # o = self.attn(q, k, v, self.layer_id)
         o = self.attn(q, k, v)
         output = self.o_proj(o)
         return output
@@ -177,11 +175,14 @@ class Qwen3DecoderLayer(nn.Module):
 
     def __init__(
         self,
+        layer_id: int, 
         attention_backend, 
         config: Qwen3Config,
     ) -> None:
         super().__init__()
+        self.layer_id = layer_id
         self.self_attn = Qwen3Attention(
+            layer_id, 
             attention_backend,
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -232,8 +233,10 @@ class Qwen3Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
+        
+        
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(attention_backend, config) for _ in range(config.num_hidden_layers)]
+            [Qwen3DecoderLayer(layer_id, attention_backend, config) for layer_id in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
