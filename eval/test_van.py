@@ -48,6 +48,7 @@ def generate_answer(local_dir="./datasets", model_path="/home/yyx/models/Qwen3-4
         log_path="./raw_logs",
         p_attn=1.0
     )
+    
     # sampling_params = SamplingParams(temperature=0.6 ,top_k=20, top_p=0.95, max_tokens=8192)
     sampling_params = SamplingParams(temperature=-1, max_tokens=512)
     # model = AutoModelForCausalLM.from_pretrained(model_path).to("cuda")
