@@ -37,7 +37,8 @@ class Log:
     discrepancy: torch.Tensor = None
     lse_log: list[torch.Tensor] = None
     logits_log: LogitsLog = None
-
+    num_topp_log: list[torch.Tensor] = None
+    selected_topp_indices: list[torch.Tensor] = None
 _LOG = Log()
 
 def get_log():
@@ -48,6 +49,20 @@ def append_lse_log(lse: torch.Tensor):
     if _LOG.lse_log is None:
         _LOG.lse_log = []
     _LOG.lse_log.append(lse)
+
+def append_num_topp(num_topp: torch.Tensor):
+    global _LOG
+    if _LOG.num_topp_log is None:
+        _LOG.num_topp_log = []
+    
+    _LOG.num_topp_log.append(num_topp)
+
+def append_selected_indices(indices: torch.Tensor):
+    global _LOG
+    if _LOG.selected_topp_indices is None:
+        _LOG.selected_topp_indices = []
+    
+    _LOG.selected_topp_indices.append(indices)
 
 def reset_log():
     global _LOG

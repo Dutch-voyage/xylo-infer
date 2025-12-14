@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .utils import compute_attention_scores
+from src.services.nanovllm_v5.utils.logging import append_num_topp, append_selected_indices
 from flashinfer.sampling import top_p_renorm_probs
 import triton 
 import triton.language as tl
@@ -118,6 +119,7 @@ class SnapKV:
         self.budget = budget
         self.window_size = window_size
         self.kernel_size = kernel_size
+        self.p_attn = kwargs["p_attn"]
 
         # for recording kept token indices
         self.record_kept_token_indices = record_kept_token_indices
@@ -137,7 +139,10 @@ class SnapKV:
         kv_cache_len = key_states.shape[-2]
 
         if kv_cache_len < self.budget:
-            return key_states, value_states
+            return {
+                "key_states": key_states, 
+                "value_states": value_states,
+            }
         else:
             attn_weights = compute_attention_scores(query_states, key_states)
 
@@ -151,17 +156,18 @@ class SnapKV:
                 .to(query_states.dtype)
             )
 
-            attn_cache = F.max_pool1d(
-                attn_weights_sum,
-                kernel_size=self.kernel_size,
-                padding=self.kernel_size // 2,
-                stride=1,
-            )
+            attn_cache = attn_weights_sum
+            # attn_cache = F.max_pool1d(
+            #     attn_weights_sum,
+            #     kernel_size=self.kernel_size,
+            #     padding=self.kernel_size // 2,
+            #     stride=1,
+            # )
             
             # shape: (bsz, num_kv_heads, budget - window_size)
             # indices = attn_cache.topk(self.budget - self.window_size, dim=-1).indices
             
-            attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=0.95)
+            attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=self.p_attn)
             
             selected_indices = torch.vmap(partial(torch.nonzero_static, size=attn_cache.shape[-1]), in_dims=(0,))(attn_topp_normed).squeeze(-1)
             # torch.set_printoptions(threshold=10000)
@@ -173,6 +179,9 @@ class SnapKV:
                 key_states[:, :, : -self.window_size, :],
                 value_states[:, :, : -self.window_size, :],
             )
+            
+            append_num_topp(num_selected)
+            append_selected_indices(selected_indices)
             
             # indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
@@ -189,4 +198,4 @@ class SnapKV:
             
             return {"key_states": key_states, 
                     "value_states": value_states, 
-                    "num_selected": num_selected}
+                    "num_selected": num_selected, }

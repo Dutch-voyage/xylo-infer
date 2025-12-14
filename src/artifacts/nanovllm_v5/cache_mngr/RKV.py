@@ -45,7 +45,10 @@ class RKV:
         kv_cache_len = key_states.shape[-2]
 
         if kv_cache_len < self.budget:
-            return key_states, value_states
+            return {
+                "key_states": key_states, 
+                "value_states": value_states,
+            }
         else:
             attn_weights = compute_attention_scores(query_states, key_states)
 
@@ -179,5 +182,4 @@ class RKV:
             value_states = torch.cat([v_past_compress, v_cur], dim=2)
             
             return {"key_states": key_states, 
-                    "value_states": value_states, 
-                    "num_selected": num_selected}
+                    "value_states": value_states}

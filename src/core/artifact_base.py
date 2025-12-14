@@ -132,8 +132,9 @@ class Artifact(ABC):
                                 return setattr(cu_artifact, name, value)
                             if hasattr(cu_artifact, "registered_by"):
                                 artifact_queue.extend([art for art_name, art in cu_artifact.registered_by.items()])
-                           
-                        setattr(self_service, name, value)
+                        
+                        setattr(self_artifact, name, value)
+                        # setattr(self_service, name, value)
 
                 # Create the proxy and call the original method
                 proxy = ArtifactProxy()

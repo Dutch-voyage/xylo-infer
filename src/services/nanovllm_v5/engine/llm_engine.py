@@ -43,7 +43,7 @@ class LLMEngine:
         self.scheduler.block_manager._register_obj("blocks", self.model_runner.cache_mngr)
                 
         self.log_steps = []
-        self.cur_step = 32
+        self.cur_step = 0
         
         atexit.register(self.exit)
 
@@ -116,6 +116,8 @@ class LLMEngine:
             pbar.update(1)
         if self.config.if_log_lse:
             self.model_runner.call("save_lse_log")
+        if self.config.if_log_num_topp:
+            self.model_runner.call("save_num_topp")
         self.model_runner.call("reset")
         self.cur_step = 32
         

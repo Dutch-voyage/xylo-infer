@@ -22,7 +22,9 @@ class Config:
     if_compress_kvcache: bool = False
     compress_method: str = "oMerge"
     if_log_lse: bool = False
+    if_log_num_topp: bool = False
     return_logits:  bool = False
+    p_attn: float = 0.99
 
     steps_between_cache_compressions: int = 128
 

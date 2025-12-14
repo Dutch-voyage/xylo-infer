@@ -59,7 +59,7 @@ class ModelRunner(BaseService):
         self.cu_seqs: list[Sequence] = []
 
         dist.init_process_group(
-            "nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank
+            "nccl", "tcp://localhost:3444", world_size=self.world_size, rank=rank
         )
         torch.cuda.set_device(rank)
         self.device = torch.device("cuda", rank)
@@ -72,11 +72,12 @@ class ModelRunner(BaseService):
         self.model = Qwen3ForCausalLM(self.attention_backend, hf_config)
         load_model(self.model, config.model)
 
+        self.p_attn = config.p_attn
         
         if self.config.compress_method == "rkv":
             self.compressor = RKV(window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "snapkv":
-            self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget)
+            self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget, p_attn=self.p_attn)
         elif self.config.compress_method == "oMerge_filter":
             self.compressor = OrthMergingFilter(
                 window_size=config.query_window_size,
@@ -127,6 +128,16 @@ class ModelRunner(BaseService):
                 dist.barrier()
                 self.shm = SharedMemory(name="nanovllm")
                 self.loop()
+                
+    def save_num_topp(self):
+        os.makedirs(self.config.log_path, exist_ok=True)
+        num_topp = get_log().num_topp_log
+        selected_topp_indices = get_log().selected_topp_indices
+        p_attn_string = f"{self.p_attn:.4f * 10000}".rstrip("0")
+        save_path = os.path.join(self.config.log_path, f"raw_num_topp_p{p_attn_string}.pt")
+        torch.save(num_topp, save_path)
+        save_path = os.path.join(self.config.log_path, f"raw_selected_topp_indices_p{p_attn_string}.pt")
+        torch.save(selected_topp_indices, save_path)
 
     def save_lse_log(self):
         lse = get_log().lse_log
@@ -189,17 +200,21 @@ class ModelRunner(BaseService):
                 and hasattr(module, "v_cache")
                 and hasattr(module, "q_cache")
             ):
-                if len(self.cu_seqs[0].block_table) > self.config.layer_budget + self.config.steps_between_cache_compressions:
-                    self.read_and_store_cache_iterative(
-                        module.q_cache, module.k_cache, module.v_cache, module.layer_id
-                    )
-                else:
-                    self.read_and_store_cache(
-                        module.q_cache, module.k_cache, module.v_cache, module.layer_id
-                    )
-        self.cu_seqs[0].block_table = self.cu_seqs[0].block_table[
-            : self.config.layer_budget
-        ]
+                # if len(self.cu_seqs[0].block_table) > self.config.layer_budget + self.config.steps_between_cache_compressions:
+                #     self.read_and_store_cache_iterative(
+                #         module.q_cache, module.k_cache, module.v_cache, module.layer_id
+                #     )
+                # else:
+                #     self.read_and_store_cache(
+                #         module.q_cache, module.k_cache, module.v_cache, module.layer_id
+                #     )
+                self.read_and_store_cache(
+                    module.q_cache, module.k_cache, module.v_cache, module.layer_id
+                )
+                
+        # self.cu_seqs[0].block_table = self.cu_seqs[0].block_table[
+        #     : self.config.layer_budget
+        # ]
 
     def save_compress_distribution(self, steps):
         save_path = os.path.join(self.config.log_path, f"compress_distribution_{steps}.pt")

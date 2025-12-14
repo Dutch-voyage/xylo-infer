@@ -48,12 +48,13 @@ class Qwen3AttentionArtifacts:
 
     def register(self, service: BaseService):
         if "attention" in service.name.lower():
-            self.attention.register_for_attn(service)
+            self.attention._register_method("attn", service)
         if "runner" in service.name.lower():    
             self.attention._register_method("init_forward_metadata_capture_cuda_graph", service)
             self.attention._register_method("init_forward_metadata_replay_cuda_graph", service)
             self.attention._register_method("update_indices", service)
-            self.attention.register_for_runner(service)
+            self.attention._register_method("prepare_metadata_for_attn_decode", service)
+            self.attention._register_method("prepare_metadata_for_attn_prefill", service)
 
 
 class Qwen3Attention(nn.Module, BaseService):

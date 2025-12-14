@@ -1,9 +1,9 @@
 import torch
 
-from src.artifacts.nanovllm_v5.cache_mngr.oMerging_v2 import OrthMerging
-from src.artifacts.nanovllm_v5.cache_mngr.oMerging import OrthMerging as OrthMerging_v1
-from src.artifacts.nanovllm_v5.cache_mngr.snapKV_topp import SnapKV 
-from src.services.nanovllm_v5.engine.sequence import Sequence
+from src.artifacts.nanovllm_v6.cache_mngr.oMerging_v2 import OrthMerging
+from src.artifacts.nanovllm_v6.cache_mngr.oMerging import OrthMerging as OrthMerging_v1
+from src.artifacts.nanovllm_v6.cache_mngr.snapKV_topp import SnapKV 
+from src.services.nanovllm_v6.engine.sequence import Sequence
 
 device = torch.device("cuda")
 

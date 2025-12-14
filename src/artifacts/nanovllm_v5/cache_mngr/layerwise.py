@@ -119,7 +119,7 @@ class CacheManager(BaseService):
             value = updated_v.transpose(1, 2).squeeze(0).contiguous()
 
             slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
-        
+            
             store_kvcache(
                 key=key,
                 value=value,

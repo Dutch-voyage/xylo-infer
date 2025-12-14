@@ -1,5 +1,5 @@
 import torch
-from src.artifacts.nanovllm_v5.layers.rotary_embedding import RotaryEmbedding
+from src.artifacts.nanovllm_v6.layers.rotary_embedding import RotaryEmbedding
 
 def test_inverse_rotary():
     head_size = 128
