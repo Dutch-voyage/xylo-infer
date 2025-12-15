@@ -3,6 +3,13 @@ from torch import nn
 import triton
 import triton.language as tl
 
+
+# NOTE 
+#==========================================#
+# Please use git apply --check latest_commit.diff in the local editable flashinfer repo to patch its code, there is a potential bug that may be fixed in the PR 
+# https://github.com/flashinfer-ai/flashinfer/pull/2201
+#==========================================#
+
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper, BatchPrefillWithRaggedKVCacheWrapper
 
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
