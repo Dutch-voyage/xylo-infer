@@ -4,9 +4,11 @@ import torch
 import os
 num_layers = 36
 num_heads = 8
-p= 999
-
-def viz_num_topp_diff(path1="./snapkv_logs/maxpool_num_topp_p999.pt", path2="./snapkv_logs/maxpool_num_topp_p99.pt"):
+method_type = "raw"
+p = 90
+p1 = 95 
+p2 = 60
+def viz_num_topp_diff(path1=f"./viz_logs/{method_type}_num_topp_p{p1}.pt", path2=f"./viz_logs/{method_type}_num_topp_p{p2}.pt"):
     data1 = torch.load(path1)
     num_topp_1 = torch.stack(data1, dim=0).reshape(-1, num_layers, num_heads)
     data2 = torch.load(path2)
@@ -14,7 +16,7 @@ def viz_num_topp_diff(path1="./snapkv_logs/maxpool_num_topp_p999.pt", path2="./s
     
     num_topp_diff = num_topp_1 - num_topp_2
     
-    figpath = "./figs/maxpool_num_topp_diff_p999_p99"
+    figpath = f"./figs/{method_type}_num_topp_diff_p{p1}_p{p2}"
     os.makedirs(figpath, exist_ok=True)
     steps = list(range(num_topp_diff.shape[0]))
     steps = [step * 32 + 512 for step in steps]
@@ -29,12 +31,12 @@ def viz_num_topp_diff(path1="./snapkv_logs/maxpool_num_topp_p999.pt", path2="./s
         fig.savefig(f"{figpath}/layer_{i}.png")
         
 
-def viz_num_topp(path=f"./snapkv_logs/raw_num_topp_p{p}.pt"):
+def viz_num_topp(path=f"./snapkv_logs/{method_type}_num_topp_p{p}.pt"):
     data = torch.load(path)
     num_topp = torch.stack(data, dim=0)
     num_topp = num_topp.reshape(-1, num_layers, num_heads)
     
-    figpath = f"./figs/raw_num_topp_p{p}"
+    figpath = f"./figs/{method_type}_num_topp_p{p}"
     os.makedirs(figpath, exist_ok=True)
     steps = list(range(num_topp.shape[0]))
     
@@ -49,18 +51,19 @@ def viz_num_topp(path=f"./snapkv_logs/raw_num_topp_p{p}.pt"):
         plt.close()
         fig.savefig(f"{figpath}/layer_{i}.png")
 
-def viz_selected_indices(path=f"./snapkv_logs/raw_selected_topp_indices_p{p}.pt", num_topp_path=f"./snapkv_logs/raw_num_topp_p{p}.pt"):
+def viz_selected_indices(path=f"./viz_logs/{method_type}_selected_topp_indices_p{p}.pt", num_topp_path=f"./viz_logs/{method_type}_num_topp_p{p}.pt"):
     data = torch.load(path)
     data_num = torch.load(num_topp_path)
     data_num = torch.stack(data_num, dim=0)
-    data_num = data_num.reshape(-1, num_layers, num_heads)
     
-    figpath = f"./figs/raw_selected_indices_p{p}"
+    data_num = data_num.reshape(-1, num_layers, num_heads)
+        
+    figpath = f"./figs/{method_type}_selected_indices_p{p}"
     os.makedirs(figpath, exist_ok=True)
     steps = [step * 32 + 512 for step in list(range(len(data) // num_layers))]
     
     for step_i in range(len(data) // num_layers):
-        if step_i % 8 !=0:
+        if step_i % 8 != 0:
              continue
         for layer_id in range(num_layers):
             i = step_i * num_layers + layer_id
@@ -91,6 +94,6 @@ def viz_selected_indices(path=f"./snapkv_logs/raw_selected_topp_indices_p{p}.pt"
     
     
 if __name__ == "__main__":
-    # viz_selected_indices()
-    viz_num_topp()
+    viz_selected_indices()
+    # viz_num_topp()
     # viz_num_topp_diff()
