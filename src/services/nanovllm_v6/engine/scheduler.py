@@ -27,7 +27,7 @@ class Scheduler:
 
     def add(self, seq: Sequence):
         self.waiting.append(seq)
-
+    
     def schedule(self) -> tuple[list[Sequence], bool]:
         # prefill
         scheduled_seqs = []

@@ -154,13 +154,15 @@ def read_kvcache_kernel(
     tl.store(value_ptr + value_offsets, value)
 
 
-def read_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
+def read_kvcache(k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor, num_kv_heads=None, head_dim=None):
     N = slot_mapping.numel()
-    num_heads = k_cache.shape[-2]
-    head_dim = k_cache.shape[-1]
-    D = num_heads * head_dim
-    key = torch.empty((N, num_heads, head_dim), dtype=k_cache.dtype, device=k_cache.device)
-    value = torch.empty((N, num_heads, head_dim), dtype=v_cache.dtype, device=v_cache.device)
+    if num_kv_heads == None:
+        num_kv_heads = k_cache.shape[-2]
+    if head_dim == None:
+        head_dim = k_cache.shape[-1]
+    D = num_kv_heads * head_dim
+    key = torch.empty((N, num_kv_heads, head_dim), dtype=k_cache.dtype, device=k_cache.device)
+    value = torch.empty((N, num_kv_heads, head_dim), dtype=v_cache.dtype, device=v_cache.device)
     
     read_kvcache_kernel[(N,)](k_cache, v_cache, slot_mapping, key, key.stride(0), value, value.stride(0), D)
     
@@ -188,7 +190,7 @@ class Attention(nn.Module, Artifact):
         self.scale = scale
         self.num_kv_heads = num_kv_heads
         self.model_runner = model_runner
-        self.if_log_lse = model_runner.config.if_log_lse
+        self.if_log_lse = model_runner.config.if_log_lse_in_attn
         self.block_size = model_runner.config.kvcache_block_size
         
         global global_workspace_buffer
@@ -495,7 +497,7 @@ class Attention(nn.Module, Artifact):
                 o, lse = self.forward_wrapper.forward_return_lse(
                     q, (k_cache, v_cache)
                 )
-                append_lse_log(lse)
+                # append_lse_log(lse)
             else:
                 o = self.forward_wrapper.forward(q, (k_cache, v_cache))
                 # o_debug = self.forward_wrapper_debug.forward(q, (k_cache, v_cache))

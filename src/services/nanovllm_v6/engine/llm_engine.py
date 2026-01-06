@@ -14,6 +14,7 @@ from src.services.nanovllm_v6.model_runner import ModelRunner
 from src.services.nanovllm_v6.utils.logging import get_log, set_log, LogCollector, LogitsLog
 from src.services.nanovllm_v6.engine.io_struct import ModelRunnerOutput
 import numpy as np
+from rich import print as rprint
 
 class LLMEngine:
 
@@ -21,7 +22,9 @@ class LLMEngine:
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         self.config = config = Config(model, **config_kwargs)
-        if not config.enforce_eager and config.if_log_lse:
+        rprint(f"[LLMEngine] Initialized with config: \n{config.to_dict()}")
+        
+        if not config.enforce_eager and config.if_log_lse_in_attn:
             print("Warning: LSE cannot be logged when cuda graph is enabled.") 
         self.ps = []
         self.events = []
@@ -114,9 +117,10 @@ class LLMEngine:
             for seq_id, token_ids, logits in output:
                 outputs[seq_id] = (token_ids, logits)
             pbar.update(1)
-        self.model_runner.call("save_lse_log")
-        self.model_runner.call("save_num_topp")
-        self.model_runner.call("reset")
+        if self.config.if_log_compress:
+            self.model_runner.call("save_lse_log")
+            self.model_runner.call("save_num_topp")
+            self.model_runner.call("reset")
         # self.cur_step = 32
         
         self.log_collector.save(self.config.log_path)

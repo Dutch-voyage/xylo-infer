@@ -36,6 +36,7 @@ class Log:
     logits_log: LogitsLog = None
     num_topp_log: list[torch.Tensor] = None
     selected_topp_indices: list[torch.Tensor] = None
+    temperatures: list[torch.Tensor] = None
 _LOG = Log()
 
 def get_log():

@@ -47,7 +47,7 @@ class Sequence:
         seq = cls()
         seq.seq_id = next(Sequence.cuda_graph_counter)
         seq.block_table = block_table
-        seq.head_extend_block_table = list(itertools.chain*([[block_id * cls.num_kv_heads + i for i in range(cls.num_kv_heads)] for block_id in block_table]))
+        seq.head_extend_block_table = list(itertools.chain(*[[block_id * cls.num_kv_heads + i for i in range(cls.num_kv_heads)] for block_id in block_table]))
         seq.headwise_mask = [255] * len(block_table) 
         seq.num_tokens = len(block_table) * cls.block_size
         return seq

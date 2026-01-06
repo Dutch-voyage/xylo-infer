@@ -20,9 +20,12 @@ from src.services.nanovllm_v6.utils.context import set_cuda_graph_flag
 
 from src.artifacts.nanovllm_v6.cache_mngr.headwise import CacheManager
 
+from src.artifacts.nanovllm_v6.cache_mngr.nocompress import NoCompress
 # from src.artifacts.nanovllm_v6.cache_mngr.snapKV import SnapKV
-from src.artifacts.nanovllm_v6.cache_mngr.snapKV_topp import SnapKV
-from src.artifacts.nanovllm_v6.cache_mngr.RKV import RKV
+from src.artifacts.nanovllm_v6.cache_mngr.snapKV_revised import SnapKV
+# from src.artifacts.nanovllm_v6.cache_mngr.RKV import RKV
+from src.artifacts.nanovllm_v6.cache_mngr.RKV_revised_v2 import RKV
+# from src.artifacts.nanovllm_v6.cache_mngr.RKV_revised import RKV
 from src.artifacts.nanovllm_v6.cache_mngr.oMerging import OrthMerging
 from src.artifacts.nanovllm_v6.cache_mngr.oMerging_filter import OrthMerging as OrthMergingFilter
 from src.services.nanovllm_v6.model_runner.models.qwen3 import Qwen3AttentionArtifacts
@@ -79,10 +82,12 @@ class ModelRunner(BaseService):
 
         self.p_attn = config.p_attn
         
-        if self.config.compress_method == "rkv":
-            self.compressor = RKV(window_size=config.query_window_size, budget=config.layer_budget)
+        if self.config.compress_method == "none":
+            self.compressor = NoCompress(config, window_size=config.query_window_size, budget=config.layer_budget)
+        elif self.config.compress_method == "rkv":
+            self.compressor = RKV(config, window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "snapkv":
-            self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget, p_attn=self.p_attn)
+            self.compressor = SnapKV(config, window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "oMerge_filter":
             self.compressor = OrthMergingFilter(
                 window_size=config.query_window_size,
@@ -144,18 +149,22 @@ class ModelRunner(BaseService):
             p_attn_string = f"{int(self.p_attn * 1000)}"
         num_topp = getattr(global_log, "num_topp_log", None)
         if num_topp is not None:
-            save_path = os.path.join(self.config.log_path, f"raw_num_topp_p{p_attn_string}.pt")
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_num_topp_p{p_attn_string}_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
             torch.save(num_topp, save_path)
         selected_topp_indices = getattr(global_log, "selected_topp_indices", None)
         if selected_topp_indices is not None:
-            save_path = os.path.join(self.config.log_path, f"raw_selected_topp_indices_p{p_attn_string}.pt")
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_selected_topp_indices_p{p_attn_string}_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
             torch.save(selected_topp_indices, save_path)
+        temperatures = getattr(global_log, "temperatures", None)
+        if temperatures is not None:
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_temperatures_topp_p{p_attn_string}_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
+            torch.save(temperatures, save_path)
         
     def save_lse_log(self):
         global_log = get_log()
         lse = getattr(global_log, "lse_log", None)
         if lse is not None:
-            save_path = os.path.join(self.config.log_path, f"lse_log.pt")
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_lse_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
             if not os.path.exists(self.config.log_path):
                 os.makedirs(self.config.log_path)
             torch.save(lse, save_path)
@@ -166,7 +175,7 @@ class ModelRunner(BaseService):
                 p_attn_string = f"{int(self.p_attn * 100)}"
             else:
                 p_attn_string = f"{int(self.p_attn * 1000)}"
-            save_path = os.path.join(self.config.log_path, f"lse_topp_p{p_attn_string}_log.pt")
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_lse_topp_p{p_attn_string}_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
             if not os.path.exists(self.config.log_path):
                 os.makedirs(self.config.log_path)
             torch.save(lse_topp, save_path)
@@ -233,13 +242,15 @@ class ModelRunner(BaseService):
                 #     self.read_and_store_cache(
                 #         module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 #     )
+                
                 self.read_and_store_cache(
                     module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 )
-                
-        # self.cu_seqs[0].block_table = self.cu_seqs[0].block_table[
-        #     : self.config.layer_budget
-        # ]
+        if self.config.if_fake_compress:
+            return  
+        self.cu_seqs[0].block_table = self.cu_seqs[0].block_table[
+            : self.config.layer_budget
+        ]
 
     def save_compress_distribution(self, steps):
         save_path = os.path.join(self.config.log_path, f"compress_distribution_{steps}.pt")

@@ -1,35 +1,46 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from .utils import compute_attention_scores, update_log
-from .binary_search import binary_search_T_linear
+import triton
+import triton.language as tl
 
 from src.services.nanovllm_v6.utils.logging import append_item_to_log
-
-class SnapKV:
+from .utils import cal_similarity, compute_attention_scores, update_log, gather_num_selected
+from flashinfer.sampling import top_p_renorm_probs
+from functools import partial
+from .binary_search import binary_search_T, gradient_descent_T
+class RKV:
     def __init__(
         self,
         config, 
         budget=128,
         window_size=8,
-        kernel_size=7, # original 7
+        kernel_size=7,
+        mix_lambda=0.03, # original 0.03
+        retain_ratio=0.2,
+        retain_direction="last",
         record_kept_token_indices=False,
+        **kwargs,
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
         self.budget = budget
         self.window_size = window_size
         self.kernel_size = kernel_size
+        self.mix_lambda = mix_lambda
+        self.retain_ratio = retain_ratio
+        self.retain_direction = retain_direction
         
         self.if_log_compress = config.if_log_compress
         self.p_attn = config.p_attn
-        
+
         # for recording kept token indices
         self.record_kept_token_indices = record_kept_token_indices
         if self.record_kept_token_indices:
             self.evicted_token_num = 0
             self.kept_token_indices = []
             self.kept_attention_scores = []
+            self.kept_similarity_scores = []
+            self.kept_final_scores = []
 
     def update_kv(
         self,
@@ -47,45 +58,73 @@ class SnapKV:
                 "value_states": value_states,
             }
         else:
-            attn_weights = compute_attention_scores(query_states, key_states)
+            attn_weights = compute_attention_scores(query_states, key_states) # shape [1, num_kv_heads, query_len, kv_cache_len]
 
-            attn_weights_sum = (
+            # attn_weights_sum = (
+            #     nn.functional.softmax(
+            #         attn_weights[:, :, -self.window_size :, : -self.window_size],
+            #         dim=-1,
+            #         dtype=torch.float32,
+            #     )
+            #     .mean(dim=-2)
+            #     .to(query_states.dtype)
+            # )
+            
+            # # TODO: Softmax then reduce head
+
+            # attn_cache = F.max_pool1d(
+            #     attn_weights_sum,
+            #     kernel_size=self.kernel_size,
+            #     padding=self.kernel_size // 2,
+            #     stride=1,
+            # )
+
+            similarity_cos = cal_similarity(
+                key_states,
+                retain_ratio=self.retain_ratio,
+                retain_direction=self.retain_direction,
+            )[:, : -self.window_size]
+            
+            similarity_cos = similarity_cos.unsqueeze(1).repeat(1, q_cache_len, 1).view(-1, kv_cache_len - self.window_size)  # shape [num_kv_heads * q_cache_len, kv_cache_len - window_size]
+            
+            # constant = self.mix_lambda * (self.mix_lambda - 1)
+            
+            raw_attn_weights = attn_weights = attn_weights[:, :, -self.window_size :, : -self.window_size]
+            
+            def transform_func(attn):
+                return self.mix_lambda * attn - (1 - self.mix_lambda) * similarity_cos
+            
+            # attn_weights = self.mix_lambda * attn_weights - (1 - self.mix_lambda) * similarity_cos
+            
+            attn_weights, T = gradient_descent_T(raw_attn_weights, self.p_attn, transform_func)
+            
+            # attn_weights = attn_weights / T.unsqueeze(-1)
+            
+            attn_weight_sum = (
                 nn.functional.softmax(
-                    attn_weights[:, :, -self.window_size :, : -self.window_size],
+                    attn_weights,
                     dim=-1,
                     dtype=torch.float32,
                 )
+                .mean(dim=-2)
                 .to(query_states.dtype)
             )
-
-            raw_attn_cache = attn_cache = attn_weights_sum.reshape(-1, kv_cache_len - self.window_size)
             
-            attn_cache = F.max_pool1d(
-                attn_cache,
-                kernel_size=self.kernel_size,
-                padding=self.kernel_size // 2,
-                stride=1,
-            )
-            
-            
-            attn_cache = attn_cache.reshape(bsz, -1, q_cache_len, kv_cache_len - self.window_size)
-            
-            T = binary_search_T_linear(raw_attn_cache, attn_cache, self.p_attn)
-            
-            attn_logits = torch.log(attn_cache + 1e-10)
-            attn_logits = attn_logits / T.unsqueeze(-1) 
-            attn_cache = torch.exp(attn_logits)
-            attn_cache = attn_cache / attn_cache.sum(dim=-1, keepdim=True)
-            
-            attn_cache = attn_cache.mean(-2)
+            attn_cache = attn_weight_sum
             
             if self.if_log_compress:
-                # print(key_states[:, :, :-self.window_size, :].shape, value_states[:, :, :-self.window_size, :].shape, query_states.shape)
                 update_log(attn_cache, key_states[:, :, :-self.window_size, :], value_states[:, :, :-self.window_size, :], query_states, self.p_attn)
+                # T [num_kv_heads, q_cache_len]
                 append_item_to_log("temperatures", T.reshape(-1).cpu())
+                
+            # final_score = attn_cache * self.mix_lambda - similarity_cos * (
+            #     1 - self.mix_lambda
+            # )
             
+            final_score = attn_cache
+
             # shape: (bsz, num_kv_heads, budget - window_size)
-            indices = attn_cache.topk(self.budget - self.window_size, dim=-1).indices
+            indices = final_score.topk(self.budget - self.window_size, dim=-1).indices
 
             #####################################################
             ###### Store evicted token indices start ############
@@ -93,6 +132,12 @@ class SnapKV:
             # shape: (num_kv_heads, budget - window_size)
             if self.record_kept_token_indices:
                 indices_cl = indices.clone().squeeze(0).to("cpu")
+
+                similarity_cos_analysis = cal_similarity(
+                    key_states,
+                    retain_ratio=self.retain_ratio,
+                    retain_direction=self.retain_direction,
+                )
 
                 attn_weights_sum_analysis = (
                     nn.functional.softmax(
@@ -110,7 +155,11 @@ class SnapKV:
                     padding=self.kernel_size // 2,
                     stride=1,
                 )
-                
+
+                final_score_analysis = attn_cache_analysis * self.mix_lambda - similarity_cos_analysis * (
+                    1 - self.mix_lambda
+                )
+
                 recent_window_indices = torch.arange(
                     kv_cache_len - self.window_size, kv_cache_len, device="cpu"
                 ).expand(indices_cl.shape[0], -1)
@@ -122,11 +171,15 @@ class SnapKV:
 
                 # Gather the scores for the kept tokens
                 attn_scores = attn_cache_analysis.clone().squeeze(0).to("cpu")
+                sim_scores = similarity_cos_analysis.clone().squeeze(0).to("cpu")
+                fin_scores = final_score_analysis.clone().squeeze(0).to("cpu")
 
                 # print(f"cur_indices {cur_indices} attn_cache_analysis {attn_cache_analysis.shape} similarity_cos_analysis {similarity_cos_analysis.shape} final_score_analysis {final_score_analysis.shape}")
 
                 # Gather the scores based on index
                 kept_attn = torch.gather(attn_scores, dim=1, index=cur_indices)
+                kept_sim = torch.gather(sim_scores, dim=1, index=cur_indices)
+                kept_final = torch.gather(fin_scores, dim=1, index=cur_indices)
 
                 #####################################################
 
@@ -149,6 +202,8 @@ class SnapKV:
                 ### Store final scores, attention and similarity ####
                 #####################################################
                 self.kept_attention_scores.append(kept_attn)
+                self.kept_similarity_scores.append(kept_sim)
+                self.kept_final_scores.append(kept_final)
                 #####################################################
 
                 self.kept_token_indices.append(cur_indices)
@@ -169,5 +224,4 @@ class SnapKV:
             value_states = torch.cat([v_past_compress, v_cur], dim=2)
             
             return {"key_states": key_states, 
-                    "value_states": value_states, 
-                   }
+                    "value_states": value_states}

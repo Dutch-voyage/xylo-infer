@@ -21,22 +21,20 @@ def evaluate(answer, ground_truth):
         # choose the concensus
         parse_result = [parse(pred, extraction_config=[ExprExtractionConfig(), LatexExtractionConfig()]) for pred in answer]
         pred_list = ["\\boxed{" + parse_result[i][1] + "}" if len(parse_result[i]) > 1 else None for i in range(len(parse_result))]
-        # choose the most frequent one
-        print(pred_list)
         preds = Counter(pred_list).most_common(1)[0][0]
     else:
         parse_result = parse(answer, extraction_config=[ExprExtractionConfig(), LatexExtractionConfig()])
         preds = parse_result[1] if len(parse_result) > 1 else None
     
     if preds is None:
-        return 0.0
+        return 0.0, None
     
     ret_score = 0.0
     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
     preds = parse(preds, extraction_config=[ExprExtractionConfig(), LatexExtractionConfig()])
     gold = parse(ground_truth_boxed, extraction_config=[LatexExtractionConfig()])
     if verify(gold, preds, 6):
-        ret_score += 1.0
+        ret_score = 1.0
     # try:
     #     ret_score, _ = verify_func([ground_truth_boxed], [answer])
     # except Exception:
@@ -44,4 +42,4 @@ def evaluate(answer, ground_truth):
     # except TimeoutException:
     #     pass
 
-    return ret_score
+    return ret_score, preds

@@ -80,7 +80,7 @@ class OrthMerging:
         score = torch.exp(score - score.amax(dim=-1, keepdim=True))
 
         # option 1: compute kv_len * kv_len matrix, here orthogonal means the the mininum index in this matrix,
-
+        
         # option 2: select the maximum and minimum score after pooling on q_len .
         score = score.mean(dim=-2)  # shape: (bsz, num_kv_heads, kv_len)
         unselected_mask = torch.ones(
