@@ -6,9 +6,10 @@ import triton.language as tl
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper, BatchPrefillWithRaggedKVCacheWrapper
 
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+from flashinfer.prefill import _compute_page_mask_indptr
 from flashinfer.decode import _get_range_buf, get_seq_lens, fast_decode_plan
 from flashinfer.cascade import merge_state
-from flashinfer.quantization import segment_packbits, packbits
+from flashinfer.quantization import segment_packbits, packbits, _get_indptr_for_packed_mask
 
 import itertools
 from typing import Optional, Union
@@ -78,6 +79,7 @@ def store_q_cache_kernel_prefill(
     query_offsets = query_window_pos * query_stride + tl.arange(0, D)
     query = tl.load(query_ptr + query_offsets)
     tl.store(q_cache_ptr + cache_offsets, query)
+
 
 @triton.jit
 def store_q_cache_kernel_decode(
@@ -204,28 +206,28 @@ class Attention(nn.Module, Artifact):
         max_seq_len = model_runner.config.max_model_len
         
         self.qo_indptr = torch.zeros(
-            (max_bs + 1, ), dtype=torch.int32, device=model_runner.device
+            (max_bs * num_kv_heads + 1, ), dtype=torch.int32, device=model_runner.device
         )
         
         self.kv_indptr = torch.zeros(
-            (max_bs + 1,), dtype=torch.int32, device=model_runner.device
+            (max_bs * num_kv_heads + 1,), dtype=torch.int32, device=model_runner.device
         )
         
         self.kv_last_page_len = torch.ones(
-            (max_bs,), dtype=torch.int32, device=model_runner.device
+            (max_bs * num_kv_heads,), dtype=torch.int32, device=model_runner.device
         )
         
         # packed_custom_mask_buf when cudagraph is enabled
         self.custom_mask_buf = torch.zeros(
-            (model_runner.config.hf_config.max_position_embeddings * max_bs // 8,), dtype=torch.uint8, device=model_runner.device
+            (model_runner.config.hf_config.max_position_embeddings * max_bs,), dtype=torch.uint8, device=model_runner.device
         )
         
         self.mask_indptr_buf = torch.zeros(
-            max_bs + 1, dtype=torch.int32, device=model_runner.device
+            max_bs * num_kv_heads + 1, dtype=torch.int32, device=model_runner.device
         )
         
         self.cuda_graph_kv_indices = torch.zeros(
-            model_runner.config.hf_config.max_position_embeddings * max_bs, 
+            model_runner.config.hf_config.max_position_embeddings * max_bs * num_kv_heads, 
             dtype=torch.int32,
             device=model_runner.device
         ) 
@@ -247,13 +249,6 @@ class Attention(nn.Module, Artifact):
             "NHD", 
             backend="auto",
         )
-        
-        self.decode_prefill_wrapper_debug = BatchPrefillWithPagedKVCacheWrapper(
-            self.workspace_buffer, 
-            "NHD", 
-            backend="auto",
-        )
-        
         self.decode_cuda_graph_metadata = {}
                
     def register_for_attn(self, service: BaseService):
@@ -308,44 +303,22 @@ class Attention(nn.Module, Artifact):
         kv_indptr = torch.cumsum(
             torch.tensor([0] + [len(table) for table in headwise_seq_table], device="cuda"),
             dim=0, dtype=torch.int32
-        )# .to(torch.int32)
+        )
         
         kv_page_indices = torch.tensor(
             list(itertools.chain(*headwise_seq_table)), device="cuda", dtype=torch.int32
-        )# .to(torch.int32)
+        )
         
         kv_last_page_lens = torch.tensor(
             [1] * (len(seqs) * self.num_kv_heads), device="cuda", dtype=torch.int32
-        )# .to(torch.int32)
+        )
 
-        qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32)# .to(torch.int32)
+        qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32) # .to(torch.int32)
         
-        # print(kv_page_indices)
-        # mask_arr = [
-        #     torch.full((len(seq.block_table),), True, device="cuda") for seq in seqs   
-        # ]
-        
-        # mask_arr = torch.tensor([seq.headwise_mask for seq in seqs], device="cuda", dtype=torch.uint8).transpose(0, 1)
         mask_arr = [torch.tensor(seq.headwise_mask, device="cuda", dtype=torch.uint8).transpose(0, 1).contiguous().view(-1) for seq in seqs]
         
         packed_custom_mask = torch.cat(mask_arr, dim=0).contiguous().view(-1)
-        
-        # # transpose [1, 2, 4, 8, 16, 32, 64, 128] * seq_length to [[1] * seq_length, [2] * seq_length, ..., [128] * seq_length]
 
-        # # print(packed_custom_mask)
-        
-        # mask_indptr = kv_indptr.clone()
-        
-        # mask = torch.diag(torch.ones(self.num_kv_heads, device="cuda", dtype=torch.bool)).unsqueeze(1).repeat(1, seqs[0].num_blocks, 1)
-        
-        # new_packed_custom_mask, mask_indptr = segment_packbits(
-        #     mask.contiguous().view(-1),
-        #     mask_indptr,
-        #     bitorder="little",
-        # )
-        
-        # print(new_packed_custom_mask)
-        # assert torch.allclose(packed_custom_mask, new_packed_custom_mask), "Packed custom mask does not match"
         self.decode_prefill_wrapper.plan(
             qo_indptr=qo_indptr, 
             paged_kv_indptr=kv_indptr,
@@ -354,47 +327,39 @@ class Attention(nn.Module, Artifact):
             num_qo_heads=self.num_heads // self.num_kv_heads,
             num_kv_heads=1,
             head_dim_qk=self.head_dim,
-            # causal=True, 
-            # custom_mask=mask.contiguous().view(-1), 
             packed_custom_mask=packed_custom_mask, 
             page_size=self.block_size,
             q_data_type=torch.bfloat16,
         )
+        
         self.forward_wrapper = self.decode_prefill_wrapper
 
-    def _update_indices(self, 
-                       bs: int, 
-                       decode_wrapper: BatchPrefillWithPagedKVCacheWrapper, 
-                       cu_page_indices: torch.Tensor, 
-                       seq_lens: torch.Tensor, 
-                       ):
-        self.qo_indptr[:bs + 1] = torch.arange(bs + 1, device="cuda").to(torch.int32)
-        qo_indptr = self.qo_indptr[:bs + 1]   
-    
-        self.kv_indptr[: bs + 1] = torch.cumsum(seq_lens, dim=0)
-        kv_indptr = self.kv_indptr[: bs + 1]
+    def _update_indices(self,
+                        bs: int,
+                        decode_wrapper: BatchDecodeWithPagedKVCacheWrapper,
+                        cu_qo_indptr: torch.Tensor,
+                        cu_kv_indptr: torch.Tensor,
+                        cu_page_indices: torch.Tensor,
+                        cu_packed_custom_mask: torch.Tensor,
+    ):
+
+        
+        self.qo_indptr[: bs * self.num_kv_heads + 1] = cu_qo_indptr
+        self.kv_indptr[: bs * self.num_kv_heads + 1] = cu_kv_indptr
+        kv_indices_buf = decode_wrapper._paged_kv_indices_buf
+        kv_indices_buf[: cu_page_indices.shape[0]] = cu_page_indices
                 
-        kv_indices = decode_wrapper._paged_kv_indices_buf
-        kv_indices[: cu_page_indices.shape[0]] = cu_page_indices
-        
-        mask_indptr = kv_indptr.clone()
-        
-        packed_custom_mask, mask_indptr = segment_packbits(
-            torch.full((kv_indptr[bs],), True, device="cuda"),
-            mask_indptr,
-            bitorder="little",
-        )
-        
-        packed_custom_mask = self.custom_mask_buf[: packed_custom_mask.shape[0]] = packed_custom_mask
+        # packed_custom_mask_buf = decode_wrapper._custom_mask_buf
+        # packed_custom_mask_buf[: cu_packed_custom_mask.shape[0]] = cu_packed_custom_mask
         
         decode_wrapper.begin_forward(
-            qo_indptr=qo_indptr, 
-            paged_kv_indptr=kv_indptr,
-            paged_kv_indices=kv_indices,
-            paged_kv_last_page_len=self.kv_last_page_len[:bs],
-            packed_custom_mask=packed_custom_mask,
-            num_qo_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
+            qo_indptr=self.qo_indptr[:bs * self.num_kv_heads + 1], 
+            paged_kv_indptr=self.kv_indptr[:bs * self.num_kv_heads + 1],
+            paged_kv_indices=cu_page_indices,
+            paged_kv_last_page_len=self.kv_last_page_len[:bs * self.num_kv_heads],
+            packed_custom_mask=cu_packed_custom_mask,
+            num_qo_heads=self.num_heads // self.num_kv_heads,
+            num_kv_heads=1,
             head_dim_qk=self.head_dim,
             page_size=self.block_size,
             q_data_type=torch.bfloat16, 
@@ -404,46 +369,51 @@ class Attention(nn.Module, Artifact):
     def init_forward_metadata_capture_cuda_graph(
         self, 
         bs: int, 
-        seq_lens: torch.Tensor, 
-        cu_page_indices: torch.Tensor, 
+        cu_qo_indptr: torch.Tensor,  
+        cu_kv_indptr: torch.Tensor, 
+        cu_page_indices: torch.Tensor,
+        cu_packed_custom_mask: torch.Tensor, 
     ):
         decode_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.workspace_buffer,
             "NHD",
             use_cuda_graph=True, 
             # use_tensor_cores=True, 
-            qo_indptr_buf=self.qo_indptr[:bs + 1],
-            paged_kv_indptr_buf=self.kv_indptr[:bs + 1],
+            qo_indptr_buf=self.qo_indptr[:bs * self.num_kv_heads + 1],
+            paged_kv_indptr_buf=self.kv_indptr[:bs * self.num_kv_heads + 1],
             paged_kv_indices_buf=self.cuda_graph_kv_indices, 
-            paged_kv_last_page_len_buf=self.kv_last_page_len[:bs], 
+            paged_kv_last_page_len_buf=self.kv_last_page_len[:bs * self.num_kv_heads], 
             custom_mask_buf=self.custom_mask_buf,
-            mask_indptr_buf=self.mask_indptr_buf[:bs + 1],
+            mask_indptr_buf=self.mask_indptr_buf[:bs * self.num_kv_heads + 1],
         )
         
         self._update_indices(
             bs, 
             decode_wrapper, 
+            cu_qo_indptr, 
+            cu_kv_indptr,
             cu_page_indices, 
-            seq_lens
+            cu_packed_custom_mask
         )
-        # TODO look into sglang's patch to find why there is an performance gain in flashinfer plan
-        # decode_wrapper.begin_forward = partial(
-        #     fast_decode_plan, decode_wrapper
-        # )
+
         self.decode_cuda_graph_metadata[bs] = decode_wrapper
         self.forward_wrapper = decode_wrapper
     
     def init_forward_metadata_replay_cuda_graph(
         self, 
         bs: int, 
-        seq_lens: torch.Tensor,  
-        cu_page_indices: torch.Tensor, 
+        cu_qo_indptr: torch.Tensor,  
+        cu_kv_indptr: torch.Tensor,
+        cu_page_indices: torch.Tensor,
+        cu_packed_custom_mask: torch.Tensor,    
     ):
         self._update_indices(
             bs, 
             self.decode_cuda_graph_metadata[bs], 
+            cu_qo_indptr, 
+            cu_kv_indptr,
             cu_page_indices, 
-            seq_lens[:bs + 1]
+            cu_packed_custom_mask
         )
 
     def attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor): 
@@ -454,20 +424,10 @@ class Attention(nn.Module, Artifact):
         context = get_context()
 
         k_cache, v_cache = self.k_cache.contiguous(), self.v_cache.contiguous()
-        # k_cache, v_cache = self.k_cache.clone(), self.v_cache.clone()
-        # k_cache = k_cache.view(-1, self.num_kv_heads, self.head_dim)
-        # v_cache = v_cache.view(-1, self.num_kv_heads, self.head_dim)
 
         if k_cache.numel() and v_cache.numel():
             # store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
             store_kvcache(k, v, self.k_cache, self.v_cache, context.slot_mapping)
-            
-            # head_slot_mapping = [slot * self.num_kv_heads for slot in context.slot_mapping]
-            
-            # if not context.is_prefill:
-            #     print(self.k_cache[head_slot_mapping].squeeze(0))
-            #     print(k_cache[context.slot_mapping][:, 0, :])
-            #     print("-")
             
         if context.is_prefill:
             store_q_cache(q, self.q_cache, context.query_slot_mapping, context.query_window_pos, is_prefill=True)
@@ -500,15 +460,6 @@ class Attention(nn.Module, Artifact):
                 # append_lse_log(lse)
             else:
                 o = self.forward_wrapper.forward(q, (k_cache, v_cache))
-                # o_debug = self.forward_wrapper_debug.forward(q, (k_cache, v_cache))
-                
-                # abs_error = torch.abs(o - o_debug)
-                
-                # rel_error = abs_error / (torch.abs(o_debug) + 1e-6)
-                
-                # print(f"Absolute error mean {abs_error.mean().item()}")
-                # print(f"Relative error mean {rel_error.mean().item()}")
-                # print('-' * 100)
                 
             o = o.view(-1, self.num_kv_heads, self.num_heads // self.num_kv_heads, self.head_dim).view(-1, self.num_heads, self.head_dim)
         o = o.view(-1, self.num_heads * self.head_dim)

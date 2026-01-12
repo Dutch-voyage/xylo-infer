@@ -4,20 +4,20 @@ import torch
 
 from ..config import Config
 from .sequence import Sequence, SequenceStatus
-from src.artifacts.nanovllm_v5.block_mngr.block_manager import BlockManager
+# from src.artifacts.nanovllm_v7.block_mngr.block_manager import BlockManager
+from src.artifacts.nanovllm_v7.block_mngr.headwise_block_manager import BlockManager
 
-from src.services.nanovllm_v5.utils.context import get_context  
-from src.artifacts.nanovllm_v5.block_mngr.query_block_manger import QueryBlockManager
+from src.services.nanovllm_v7.utils.context import get_context  
+from src.artifacts.nanovllm_v7.block_mngr.query_block_manger import QueryBlockManager
 
 
 class Scheduler:
 
     def __init__(self, config: Config):
-        # self.max_num_seqs = config.max_num_seqs
-        self.max_num_seqs = config.lazy_max_num_seqs if config.lazy_max_num_seqs > 0 else config.max_num_seqs
+        self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
-        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size, config.hf_config.num_key_value_heads)
         self.query_block_manager = QueryBlockManager(config.max_num_seqs, config.query_window_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -27,7 +27,7 @@ class Scheduler:
 
     def add(self, seq: Sequence):
         self.waiting.append(seq)
-
+    
     def schedule(self) -> tuple[list[Sequence], bool]:
         # prefill
         scheduled_seqs = []

@@ -4,8 +4,6 @@ import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
-from src.core.utils import cdiv
-
 from ..config import Config
 from ..engine.sequence import Sequence
 from .models.qwen3 import Qwen3ForCausalLM
@@ -18,17 +16,23 @@ from src.core.service_base import BaseService
 import itertools
 from ..engine.io_struct import SamplingInfo, ModelRunnerOutput
 
-from src.services.nanovllm_v5.utils.context import set_cuda_graph_flag
+from src.services.nanovllm_v6.utils.context import set_cuda_graph_flag
 
-from src.artifacts.nanovllm_v5.cache_mngr.layerwise import CacheManager
+from src.artifacts.nanovllm_v6.cache_mngr.headwise import CacheManager
 
-from src.artifacts.nanovllm_v5.cache_mngr.snapKV import SnapKV
-# from src.artifacts.nanovllm_v5.cache_mngr.snapKV_topp import SnapKV
-from src.artifacts.nanovllm_v5.cache_mngr.RKV import RKV
-from src.artifacts.nanovllm_v5.cache_mngr.oMerging import OrthMerging
-from src.artifacts.nanovllm_v5.cache_mngr.oMerging_filter import OrthMerging as OrthMergingFilter
-from src.services.nanovllm_v5.model_runner.models.qwen3 import Qwen3AttentionArtifacts
+# NOTE should be deprecated
+# from src.artifacts.nanovllm_v6.cache_mngr.layerwise import CacheManager
+from src.artifacts.nanovllm_v6.cache_mngr.nocompress import NoCompress
+# from src.artifacts.nanovllm_v6.cache_mngr.snapKV import SnapKV
+from src.artifacts.nanovllm_v6.cache_mngr.snapKV_revised import SnapKV
+# from src.artifacts.nanovllm_v6.cache_mngr.RKV import RKV
+from src.artifacts.nanovllm_v6.cache_mngr.RKV_revised_v2 import RKV
+# from src.artifacts.nanovllm_v6.cache_mngr.RKV_revised import RKV
+from src.artifacts.nanovllm_v6.cache_mngr.oMerging import OrthMerging
+from src.artifacts.nanovllm_v6.cache_mngr.oMerging_filter import OrthMerging as OrthMergingFilter
+from src.services.nanovllm_v6.model_runner.models.qwen3 import Qwen3AttentionArtifacts
 
+from src.services.nanovllm_v6.utils.socket import is_port_in_use
 import os
 
 from enum import Enum
@@ -58,10 +62,12 @@ class ModelRunner(BaseService):
         self.rank = rank
         self.event = event
         
-        # self.cu_seqs: list[Sequence] = []
-
+        port_num = 3444
+        while is_port_in_use(port_num):
+            port_num += 1
+        
         dist.init_process_group(
-            "nccl", "tcp://localhost:3444", world_size=self.world_size, rank=rank
+            "nccl", f"tcp://localhost:{port_num}", world_size=self.world_size, rank=rank
         )
         torch.cuda.set_device(rank)
         self.device = torch.device("cuda", rank)
@@ -76,10 +82,12 @@ class ModelRunner(BaseService):
 
         self.p_attn = config.p_attn
         
-        if self.config.compress_method == "rkv":
-            self.compressor = RKV(window_size=config.query_window_size, budget=config.layer_budget)
+        if self.config.compress_method == "none":
+            self.compressor = NoCompress(config, window_size=config.query_window_size, budget=config.layer_budget)
+        elif self.config.compress_method == "rkv":
+            self.compressor = RKV(config, window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "snapkv":
-            self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget, p_attn=self.p_attn)
+            self.compressor = SnapKV(config, window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "oMerge_filter":
             self.compressor = OrthMergingFilter(
                 window_size=config.query_window_size,
@@ -101,13 +109,13 @@ class ModelRunner(BaseService):
         
         self.cache_mngr = CacheManager(self.attention_backend, config, self.compressor)
 
-        self.cache_mngr._register_method("log_page_indices", self)
+        self.cache_mngr._register_method("allocate_page_indices", self)
+        self.cache_mngr._register_method("allocate_page_indices_cudagraph", self)
         self.cache_mngr._register_method("read_and_store_cache", self)
         self.cache_mngr._register_method("read_and_store_cache_iterative", self)
         self.cache_mngr._register_method("update_indices", self)
         self.cache_mngr._register_method("update_indices_capture", self)
         self.cache_mngr._register_method("update_indices_replay", self)
-        self.cache_mngr._register_obj("cu_seqs", self)
 
         self.sampler = Sampler()
         global stage
@@ -131,23 +139,47 @@ class ModelRunner(BaseService):
                 dist.barrier()
                 self.shm = SharedMemory(name="nanovllm")
                 self.loop()
-                
+    
     def save_num_topp(self):
         os.makedirs(self.config.log_path, exist_ok=True)
-        num_topp = get_log().num_topp_log
-        selected_topp_indices = get_log().selected_topp_indices
-        p_attn_string = f"{self.p_attn:.4f * 10000}".rstrip("0")
-        save_path = os.path.join(self.config.log_path, f"raw_num_topp_p{p_attn_string}.pt")
-        torch.save(num_topp, save_path)
-        save_path = os.path.join(self.config.log_path, f"raw_selected_topp_indices_p{p_attn_string}.pt")
-        torch.save(selected_topp_indices, save_path)
-
+        global_log = get_log()
+        assert getattr(self, "p_attn", None) is not None, "please specify p_attn when logging selected_topp_indices"
+        if 1 - self.p_attn >= 0.01:
+            p_attn_string = f"{int(self.p_attn * 100)}"
+        else:
+            p_attn_string = f"{int(self.p_attn * 1000)}"
+        num_topp = getattr(global_log, "num_topp_log", None)
+        if num_topp is not None:
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_num_topp_p{p_attn_string}_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
+            torch.save(num_topp, save_path)
+        selected_topp_indices = getattr(global_log, "selected_topp_indices", None)
+        if selected_topp_indices is not None:
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_selected_topp_indices_p{p_attn_string}_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
+            torch.save(selected_topp_indices, save_path)
+        temperatures = getattr(global_log, "temperatures", None)
+        if temperatures is not None:
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_temperatures_topp_p{p_attn_string}_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
+            torch.save(temperatures, save_path)
+        
     def save_lse_log(self):
-        lse = get_log().lse_log
-        save_path = os.path.join(self.config.log_path, f"lse_log.pt")
-        if not os.path.exists(self.config.log_path):
-            os.makedirs(self.config.log_path)
-        torch.save(lse, save_path)
+        global_log = get_log()
+        lse = getattr(global_log, "lse_log", None)
+        if lse is not None:
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_lse_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
+            if not os.path.exists(self.config.log_path):
+                os.makedirs(self.config.log_path)
+            torch.save(lse, save_path)
+        lse_topp = getattr(global_log, "lse_topp_log", None)
+        if lse_topp is not None:
+            assert getattr(self, "p_attn", None) is not None, "please specify p_attn when logging selected_topp_indices"
+            if 1 - self.p_attn >= 0.01:
+                p_attn_string = f"{int(self.p_attn * 100)}"
+            else:
+                p_attn_string = f"{int(self.p_attn * 1000)}"
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_lse_topp_p{p_attn_string}_{self.config.layer_budget}_{not self.config.if_fake_compress}.pt")
+            if not os.path.exists(self.config.log_path):
+                os.makedirs(self.config.log_path)
+            torch.save(lse_topp, save_path)
 
     def reset(self):
         if hasattr(self.compressor, "reset_indices"):
@@ -211,12 +243,16 @@ class ModelRunner(BaseService):
                 #     self.read_and_store_cache(
                 #         module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 #     )
+                
                 self.read_and_store_cache(
                     module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 )
         
-        for seq in self.cu_seqs:    
-            self.update_blocks_post_compression(seq, self.config.layer_budget)
+        if self.config.if_fake_compress:
+            return  
+        self.cu_seqs[0].block_table = self.cu_seqs[0].block_table[
+            : self.config.layer_budget
+        ]
 
     def save_compress_distribution(self, steps):
         save_path = os.path.join(self.config.log_path, f"compress_distribution_{steps}.pt")
@@ -271,19 +307,15 @@ class ModelRunner(BaseService):
             int(total * config.gpu_memory_utilization - used - peak + current)
             // block_bytes
         )
-        
-        if config.if_compress_kvcache:
-            config.lazy_max_num_seqs = cdiv(config.num_kvcache_blocks, (config.layer_budget + config.steps_between_cache_compressions))
-        else:
-            config.lazy_max_num_seqs = cdiv(config.num_kvcache_blocks, config.max_model_len) 
-        
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.zeros(
             2,
             hf_config.num_hidden_layers,
-            config.num_kvcache_blocks,
-            self.block_size,
+            config.num_kvcache_blocks, 
             num_kv_heads,
+            self.block_size,
+            # num_kv_heads,
+            1, 
             hf_config.head_dim,
         )
 
@@ -394,7 +426,14 @@ class ModelRunner(BaseService):
             query_slot_mapping,
             query_window_pos,
         )
-        self.log_page_indices(seqs)
+        
+        if not self.enforce_eager and stage != RunningStage.WARMUP:
+            # cuda_graph enabled
+            self.allocate_page_indices_cudagraph(seqs)
+        else:
+            self.allocate_page_indices(seqs)
+        
+        self.update_indices()
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -409,6 +448,7 @@ class ModelRunner(BaseService):
             input_ids.append(seq.last_token)
             positions.append(len(seq))
             context_lens.append(len(seq))
+            
             slot_mapping.append(
                 seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
             )
@@ -431,7 +471,7 @@ class ModelRunner(BaseService):
         context_lens = torch.tensor(
             context_lens, dtype=torch.int32, pin_memory=True
         ).cuda(non_blocking=True)
-        # block_tables = self.prepare_block_tables(seqs)
+        block_tables = self.prepare_block_tables(seqs)
 
         query_slot_mapping = torch.tensor(
             query_slot_mapping, dtype=torch.int32, pin_memory=True
@@ -441,20 +481,19 @@ class ModelRunner(BaseService):
             False,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
-            block_tables=None, 
-            # block_tables=block_tables,
+            block_tables=block_tables,
             query_slot_mapping=query_slot_mapping,
         )
 
-        self.log_page_indices(seqs)
+        # self.allocate_page_indices(seqs)
 
         if not self.enforce_eager and stage != RunningStage.WARMUP:
             # cuda_graph enabled
+            self.allocate_page_indices_cudagraph(seqs)
             self.update_indices_replay(bs=len(seqs))
         else:
-            # a = 1
+            self.allocate_page_indices(seqs)
             self.update_indices()
-            # pass
         return input_ids, positions
 
     # def prepare_sample(self, seqs: list[Sequence]):
@@ -492,6 +531,7 @@ class ModelRunner(BaseService):
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
+    @torch.inference_mode()
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = (
             self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
@@ -505,6 +545,7 @@ class ModelRunner(BaseService):
             self.sampler(logits, sampling_infos).tolist() if self.rank == 0 else None
         )
         reset_context()
+        # return ModelRunnerOutput(token_ids=token_ids, logits=logits)
         return ModelRunnerOutput(token_ids=token_ids, logits=None)
 
     @torch.inference_mode()
@@ -521,10 +562,9 @@ class ModelRunner(BaseService):
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
 
         seqs = [Sequence.for_capture([0]) for _ in range(max_bs)]
-
+        
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        # self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
-        self.graph_bs = list(range(1, 31))
+        self.graph_bs = list(range(1, 32))
         self.graphs = {}
         self.graph_pool = None
 
@@ -538,7 +578,7 @@ class ModelRunner(BaseService):
                 query_slot_mapping=query_slot_mapping[:bs],
             )
             # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
-            self.log_page_indices(seqs[:bs])
+            self.allocate_page_indices(seqs[:bs])
             self.update_indices_capture(bs)
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
             with torch.cuda.graph(graph, self.graph_pool):

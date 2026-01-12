@@ -31,10 +31,6 @@ class CacheManager(BaseService):
     
         attention_backend.register(self)
 
-        self.num_kv_heads = config.hf_config.num_key_value_heads 
-        
-        self.head_dim = config.hf_config.head_dim
-        
         self.num_layers = config.hf_config.num_hidden_layers
 
         self.seq_to_layer_block_table = {}
@@ -42,24 +38,20 @@ class CacheManager(BaseService):
         self.cu_page_indices = self.cu_seq_lens = None
 
         self.compressor = compressor
-        
-        self.if_fake_compress = config.if_fake_compress
 
-    def arrange_page_indices(self, seqs):
+    def allocate_page_indices(self, seqs):
         # move to model runner before capturing cuda graph
         self.cu_seqs = seqs
-        seq_lens = torch.tensor(
-            [0] + [len(seq.block_table) for seq in self.cu_seqs]
-        ).to(torch.int32)
+        occupied_pages = 0
         cu_page_indices = torch.tensor(
             list(itertools.chain(*[seq.block_table for seq in seqs]))
         ).to(torch.int32)
-        
+        occupied_pages = cu_page_indices.shape[0]
+        seq_lens = torch.tensor(
+            [0] + [ + len(seq.block_table) for seq in self.cu_seqs]
+        ).to(torch.int32)
         self.page_indices = cu_page_indices
         self.seq_lens = seq_lens
-        self.log_occupied_pages(cu_page_indices.shape[0])
-    
-    def log_occupied_pages(self, occupied_pages):
         log = get_log()
         log.occupied_pages = occupied_pages
         set_log(log)
@@ -73,6 +65,7 @@ class CacheManager(BaseService):
             self.prepare_metadata_for_attn_decode(
                 self.cu_seqs
             )
+
 
     def update_indices_capture(self, bs: int):
         self.init_forward_metadata_capture_cuda_graph(
@@ -115,8 +108,6 @@ class CacheManager(BaseService):
                 k_cache=k_cache,
                 v_cache=v_cache,
                 slot_mapping=slot_mappings_tensor,
-                num_kv_heads=self.num_kv_heads, 
-                head_dim=self.head_dim
             )
             
             key = key.unsqueeze(0)
@@ -167,13 +158,11 @@ class CacheManager(BaseService):
             q_cache=q_cache,
             query_slot_mapping=query_slot_mapping_tensor,
         )
-        
+
         key, value = read_kvcache(
             k_cache=k_cache,
             v_cache=v_cache,
             slot_mapping=slot_mappings_tensor,
-            num_kv_heads=self.num_kv_heads,
-            head_dim=self.head_dim
         )
         
         key = key.unsqueeze(0)
@@ -187,17 +176,15 @@ class CacheManager(BaseService):
             layer_id, 
         )
         
-        if self.if_fake_compress:
-            return 
-        
         updated_k = ret["key_states"]
         updated_v = ret["value_states"]
 
         key = updated_k.transpose(1, 2).squeeze(0).contiguous()
         value = updated_v.transpose(1, 2).squeeze(0).contiguous()
         
+
         slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
-        
+    
         store_kvcache(
             key=key,
             value=value,

@@ -16,21 +16,23 @@ from src.core.service_base import BaseService
 import itertools
 from ..engine.io_struct import SamplingInfo, ModelRunnerOutput
 
-from src.services.nanovllm_v6.utils.context import set_cuda_graph_flag
+from src.services.nanovllm_v7.utils.context import set_cuda_graph_flag
 
-from src.artifacts.nanovllm_v6.cache_mngr.headwise import CacheManager
+from src.artifacts.nanovllm_v7.cache_mngr.headwise import CacheManager
 
-from src.artifacts.nanovllm_v6.cache_mngr.nocompress import NoCompress
-# from src.artifacts.nanovllm_v6.cache_mngr.snapKV import SnapKV
-from src.artifacts.nanovllm_v6.cache_mngr.snapKV_revised import SnapKV
-# from src.artifacts.nanovllm_v6.cache_mngr.RKV import RKV
-from src.artifacts.nanovllm_v6.cache_mngr.RKV_revised_v2 import RKV
-# from src.artifacts.nanovllm_v6.cache_mngr.RKV_revised import RKV
-from src.artifacts.nanovllm_v6.cache_mngr.oMerging import OrthMerging
-from src.artifacts.nanovllm_v6.cache_mngr.oMerging_filter import OrthMerging as OrthMergingFilter
-from src.services.nanovllm_v6.model_runner.models.qwen3 import Qwen3AttentionArtifacts
+# NOTE should be deprecated
+# from src.artifacts.nanovllm_v7.cache_mngr.layerwise import CacheManager
+from src.artifacts.nanovllm_v7.cache_mngr.nocompress import NoCompress
+# from src.artifacts.nanovllm_v7.cache_mngr.snapKV import SnapKV
+from src.artifacts.nanovllm_v7.cache_mngr.snapKV_revised import SnapKV
+# from src.artifacts.nanovllm_v7.cache_mngr.RKV import RKV
+from src.artifacts.nanovllm_v7.cache_mngr.RKV_revised_v2 import RKV
+# from src.artifacts.nanovllm_v7.cache_mngr.RKV_revised import RKV
+from src.artifacts.nanovllm_v7.cache_mngr.oMerging import OrthMerging
+from src.artifacts.nanovllm_v7.cache_mngr.oMerging_filter import OrthMerging as OrthMergingFilter
+from src.services.nanovllm_v7.model_runner.models.qwen3 import Qwen3AttentionArtifacts
 
-from src.services.nanovllm_v6.utils.socket import is_port_in_use
+from src.services.nanovllm_v7.utils.socket import is_port_in_use
 import os
 
 from enum import Enum
@@ -60,8 +62,6 @@ class ModelRunner(BaseService):
         self.rank = rank
         self.event = event
         
-        self.cu_seqs: list[Sequence] = []
-
         port_num = 3444
         while is_port_in_use(port_num):
             port_num += 1
@@ -109,7 +109,8 @@ class ModelRunner(BaseService):
         
         self.cache_mngr = CacheManager(self.attention_backend, config, self.compressor)
 
-        self.cache_mngr._register_method("arrange_page_indices", self)
+        self.cache_mngr._register_method("allocate_page_indices", self)
+        self.cache_mngr._register_method("allocate_page_indices_cudagraph", self)
         self.cache_mngr._register_method("read_and_store_cache", self)
         self.cache_mngr._register_method("read_and_store_cache_iterative", self)
         self.cache_mngr._register_method("update_indices", self)
@@ -246,6 +247,7 @@ class ModelRunner(BaseService):
                 self.read_and_store_cache(
                     module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 )
+        
         if self.config.if_fake_compress:
             return  
         self.cu_seqs[0].block_table = self.cu_seqs[0].block_table[
@@ -424,7 +426,13 @@ class ModelRunner(BaseService):
             query_slot_mapping,
             query_window_pos,
         )
-        self.arrange_page_indices(seqs)
+        
+        if not self.enforce_eager and stage != RunningStage.WARMUP:
+            # cuda_graph enabled
+            self.allocate_page_indices_cudagraph(seqs)
+        else:
+            self.allocate_page_indices(seqs)
+        
         self.update_indices()
         return input_ids, positions
 
@@ -440,6 +448,7 @@ class ModelRunner(BaseService):
             input_ids.append(seq.last_token)
             positions.append(len(seq))
             context_lens.append(len(seq))
+            
             slot_mapping.append(
                 seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
             )
@@ -476,12 +485,15 @@ class ModelRunner(BaseService):
             query_slot_mapping=query_slot_mapping,
         )
 
-        self.arrange_page_indices(seqs)
-
+        # self.allocate_page_indices(seqs)
+        self.decode_time = 0
+        self.decode_time += 1
         if not self.enforce_eager and stage != RunningStage.WARMUP:
             # cuda_graph enabled
+            self.allocate_page_indices_cudagraph(seqs)
             self.update_indices_replay(bs=len(seqs))
         else:
+            self.allocate_page_indices(seqs)
             self.update_indices()
         return input_ids, positions
 
@@ -552,15 +564,8 @@ class ModelRunner(BaseService):
 
         seqs = [Sequence.for_capture([0]) for _ in range(max_bs)]
         
-        cu_page_indices = torch.tensor(
-            list(itertools.chain(*[seq.block_table for seq in seqs])), device=self.device
-        ).to(torch.int32)
-        seq_lens = torch.tensor(
-            [0] + [len(seq.block_table) for seq in seqs], device=self.device
-        )
-
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = list(range(1, 8))
+        self.graph_bs = list(range(1, 32))
         self.graphs = {}
         self.graph_pool = None
 
@@ -574,7 +579,7 @@ class ModelRunner(BaseService):
                 query_slot_mapping=query_slot_mapping[:bs],
             )
             # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
-            self.arrange_page_indices(seqs[:bs])
+            self.allocate_page_indices(seqs[:bs])
             self.update_indices_capture(bs)
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
             with torch.cuda.graph(graph, self.graph_pool):

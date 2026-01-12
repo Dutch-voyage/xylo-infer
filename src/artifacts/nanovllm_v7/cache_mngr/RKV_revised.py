@@ -1,18 +1,23 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 
-from .utils import cal_similarity, compute_attention_scores
-
-
+from src.services.nanovllm_v7.utils.logging import append_item_to_log
+from .utils import cal_similarity, compute_attention_scores, update_log, gather_num_selected
+from flashinfer.sampling import top_p_renorm_probs
+from functools import partial
+from .binary_search import binary_search_T, gradient_descent_T
 class RKV:
     def __init__(
         self,
+        config, 
         budget=128,
         window_size=8,
         kernel_size=7,
-        mix_lambda=0.07,
-        retain_ratio=0.1,
+        mix_lambda=0.03, # original 0.03
+        retain_ratio=0.2,
         retain_direction="last",
         record_kept_token_indices=False,
         **kwargs,
@@ -24,6 +29,9 @@ class RKV:
         self.mix_lambda = mix_lambda
         self.retain_ratio = retain_ratio
         self.retain_direction = retain_direction
+        
+        self.if_log_compress = config.if_log_compress
+        self.p_attn = config.p_attn
 
         # for recording kept token indices
         self.record_kept_token_indices = record_kept_token_indices
@@ -41,7 +49,7 @@ class RKV:
         value_states,
         *args, 
     ):
-        head_dim = query_states.shape[-1]
+        bsz, q_cache_len, num_heads, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
 
         if kv_cache_len < self.budget:
@@ -50,11 +58,51 @@ class RKV:
                 "value_states": value_states,
             }
         else:
-            attn_weights = compute_attention_scores(query_states, key_states)
+            attn_weights = compute_attention_scores(query_states, key_states) # shape [1, num_kv_heads, query_len, kv_cache_len]
 
-            attn_weights_sum = (
+            # attn_weights_sum = (
+            #     nn.functional.softmax(
+            #         attn_weights[:, :, -self.window_size :, : -self.window_size],
+            #         dim=-1,
+            #         dtype=torch.float32,
+            #     )
+            #     .mean(dim=-2)
+            #     .to(query_states.dtype)
+            # )
+            
+            # # TODO: Softmax then reduce head
+
+            # attn_cache = F.max_pool1d(
+            #     attn_weights_sum,
+            #     kernel_size=self.kernel_size,
+            #     padding=self.kernel_size // 2,
+            #     stride=1,
+            # )
+
+            similarity_cos = cal_similarity(
+                key_states,
+                retain_ratio=self.retain_ratio,
+                retain_direction=self.retain_direction,
+            )[:, : -self.window_size]
+            
+            similarity_cos = similarity_cos.unsqueeze(1).repeat(1, q_cache_len, 1).view(-1, kv_cache_len - self.window_size)  # shape [num_kv_heads * q_cache_len, kv_cache_len - window_size]
+            
+            # constant = self.mix_lambda * (self.mix_lambda - 1)
+            
+            raw_attn_weights = attn_weights = attn_weights[:, :, -self.window_size :, : -self.window_size]
+            
+            def transform_func(attn):
+                return self.mix_lambda * attn - (1 - self.mix_lambda) * similarity_cos
+            
+            # attn_weights = self.mix_lambda * attn_weights - (1 - self.mix_lambda) * similarity_cos
+            
+            attn_weights, T = gradient_descent_T(raw_attn_weights, self.p_attn, transform_func)
+            
+            # attn_weights = attn_weights / T.unsqueeze(-1)
+            
+            attn_weight_sum = (
                 nn.functional.softmax(
-                    attn_weights[:, :, -self.window_size :, : -self.window_size],
+                    attn_weights,
                     dim=-1,
                     dtype=torch.float32,
                 )
@@ -62,24 +110,18 @@ class RKV:
                 .to(query_states.dtype)
             )
             
-            # TODO: Softmax then reduce head
-
-            attn_cache = F.max_pool1d(
-                attn_weights_sum,
-                kernel_size=self.kernel_size,
-                padding=self.kernel_size // 2,
-                stride=1,
-            )
-
-            similarity_cos = cal_similarity(
-                key_states,
-                retain_ratio=self.retain_ratio,
-                retain_direction=self.retain_direction,
-            )[:, : -self.window_size]
-
-            final_score = attn_cache * self.mix_lambda - similarity_cos * (
-                1 - self.mix_lambda
-            )
+            attn_cache = attn_weight_sum
+            
+            if self.if_log_compress:
+                update_log(attn_cache, key_states[:, :, :-self.window_size, :], value_states[:, :, :-self.window_size, :], query_states, self.p_attn)
+                # T [num_kv_heads, q_cache_len]
+                append_item_to_log("temperatures", T.reshape(-1).cpu())
+                
+            # final_score = attn_cache * self.mix_lambda - similarity_cos * (
+            #     1 - self.mix_lambda
+            # )
+            
+            final_score = attn_cache
 
             # shape: (bsz, num_kv_heads, budget - window_size)
             indices = final_score.topk(self.budget - self.window_size, dim=-1).indices

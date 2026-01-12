@@ -258,13 +258,13 @@ class Attention(nn.Module, Artifact):
                        seq_lens: torch.Tensor, 
                        ):
         self.kv_indptr[1: bs + 1] = torch.cumsum(seq_lens, dim=0)
-        self.kv_indptr = self.kv_indptr[: bs + 1]
+        kv_indptr = self.kv_indptr[: bs + 1]
         
         kv_indices = decode_wrapper._paged_kv_indices_buf
         kv_indices[: cu_page_indices.shape[0]] = cu_page_indices
         
         decode_wrapper.begin_forward(
-            indptr=self.kv_indptr,
+            indptr=kv_indptr,
             indices=kv_indices,
             last_page_len=self.kv_last_page_len[:bs],
             num_qo_heads=self.num_heads,
@@ -297,6 +297,7 @@ class Attention(nn.Module, Artifact):
             cu_page_indices, 
             seq_lens
         )
+                
         # TODO look into sglang's patch to find why there is an performance gain in flashinfer plan
         # decode_wrapper.begin_forward = partial(
         #     fast_decode_plan, decode_wrapper

@@ -2,12 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .utils import cal_similarity, compute_attention_scores
+from src.services.nanovllm_v7.utils.logging import append_item_to_log
 
+from .utils import cal_similarity, compute_attention_scores, update_log
+from .binary_search import binary_search_T_linear, gradient_descent_T_linear, gradient_descent_T, binary_search_T
 
 class RKV:
     def __init__(
         self,
+        config, 
         budget=128,
         window_size=8,
         kernel_size=7,
@@ -25,6 +28,9 @@ class RKV:
         self.retain_ratio = retain_ratio
         self.retain_direction = retain_direction
 
+        self.p_attn = config.p_attn
+        self.if_log_compress = config.if_log_compress
+        
         # for recording kept token indices
         self.record_kept_token_indices = record_kept_token_indices
         if self.record_kept_token_indices:
@@ -41,48 +47,82 @@ class RKV:
         value_states,
         *args, 
     ):
-        head_dim = query_states.shape[-1]
+        bsz, num_heads, q_cache_len, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
-
+        
         if kv_cache_len < self.budget:
             return {
                 "key_states": key_states, 
                 "value_states": value_states,
             }
         else:
+            # query_states = query_states.mean(dim=2, keepdim=True)
+            
+            # the following computation accept query_states in HND layout 
             attn_weights = compute_attention_scores(query_states, key_states)
-
-            attn_weights_sum = (
-                nn.functional.softmax(
-                    attn_weights[:, :, -self.window_size :, : -self.window_size],
-                    dim=-1,
-                    dtype=torch.float32,
-                )
-                .mean(dim=-2)
-                .to(query_states.dtype)
-            )
+            
+            # attn_weights = attn_weights.squeeze(2)
+            
+            # raw_attn_weights = attn_weights[:, :, : -self.window_size]
+            raw_attn_weights = attn_weights[:, :, -self.window_size :, : -self.window_size]
             
             # TODO: Softmax then reduce head
 
-            attn_cache = F.max_pool1d(
-                attn_weights_sum,
-                kernel_size=self.kernel_size,
-                padding=self.kernel_size // 2,
-                stride=1,
-            )
-
+            # attn_cache = F.max_pool1d(
+            #     attn_weights_sum,
+            #     kernel_size=self.kernel_size,
+            #     padding=self.kernel_size // 2,
+            #     stride=1,
+            # )
+            
             similarity_cos = cal_similarity(
                 key_states,
                 retain_ratio=self.retain_ratio,
                 retain_direction=self.retain_direction,
             )[:, : -self.window_size]
-
-            final_score = attn_cache * self.mix_lambda - similarity_cos * (
-                1 - self.mix_lambda
+            
+            # print(similarity_cos.max().item(), similarity_cos.min().item(), similarity_cos.mean().item())
+            
+            similarity_cos = (-similarity_cos)
+            # similarity_cos -= similarity_cos.amin(dim=-1, keepdim=True)
+            # similarity_cos = similarity_cos / similarity_cos.sum(dim=-1, keepdim=True)
+            
+            similarity_cos = similarity_cos.unsqueeze(1).repeat(1, q_cache_len, 1).view(-1, kv_cache_len - self.window_size)  # shape [num_kv_heads * q_cache_len, kv_cache_len - window_size]
+            
+            def transform_func(x):
+                return x * self.mix_lambda + similarity_cos * (1 - self.mix_lambda)
+                                    
+            attn_weights, T = gradient_descent_T(
+                raw_attn_weights,  
+                self.p_attn,
+                transform_func, 
             )
+            
+            # attn_weights, T = binary_search_T(
+            #     raw_attn_weights, 
+            #     self.p_attn, 
+            #     transform_func
+            # )
+            
+            attn_cache = (
+                nn.functional.softmax(
+                    attn_weights,
+                    dim=-1,
+                    dtype=torch.float32,
+                )
+                .mean(dim=-2)
+                .to(query_states.dtype)
+            ) 
 
+            # shifted_probs = shifted_probs.mean(-2)
+            
+            if self.if_log_compress:
+                update_log(attn_cache, key_states[:, :, :-self.window_size, :], value_states[:, :, :-self.window_size, :], query_states, self.p_attn)
+                # T [num_kv_heads, q_cache_len]
+                append_item_to_log("temperatures", T.reshape(-1).cpu())
+            
             # shape: (bsz, num_kv_heads, budget - window_size)
-            indices = final_score.topk(self.budget - self.window_size, dim=-1).indices
+            indices = attn_cache.topk(self.budget - self.window_size, dim=-1).indices
 
             #####################################################
             ###### Store evicted token indices start ############

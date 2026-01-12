@@ -4,7 +4,7 @@ from collections import deque
 import xxhash
 import numpy as np
 
-from src.services.nanovllm_v6.engine.sequence import Sequence
+from src.services.nanovllm_v7.engine.sequence import Sequence
 
 from src.core.service_base import BaseService
 
@@ -57,9 +57,9 @@ class BlockManager(BaseService):
             block = self._allocate_block(block_id)
             block.update(token_ids)
             seq.block_table.append(block_id)
-            seq.head_extend_block_table.extend([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
-            seq.headwise_mask.append([2 ** i for i in range(self.num_kv_heads)]) # 0b11111111, indicating the all heads in this block
-
+            seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
+            seq.headwise_mask.append([0xFF]) # 0b11111111, indicating the all heads in this block
+    
     def deallocate(self, seq: Sequence):
         for block_id in reversed(seq.block_table):
             self._deallocate_block(block_id)
@@ -77,5 +77,5 @@ class BlockManager(BaseService):
         block_id = self.free_block_ids[0]
         self._allocate_block(block_id)
         seq.block_table.append(block_id)
-        seq.head_extend_block_table.extend([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
-        seq.headwise_mask.append([2 ** i for i in range(self.num_kv_heads)]) # little order: [1] for [0b10000000], [128] for [0b00000001]
+        seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
+        seq.headwise_mask.append([0xFF]) # 0b11111111, indicating the all heads in this block

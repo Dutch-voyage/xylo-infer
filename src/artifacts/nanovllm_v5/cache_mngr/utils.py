@@ -35,13 +35,17 @@ def compute_attention_scores(query_states, key_states, pooling="max"):
     return attn_weights
 
 
+
 def cal_similarity(
-    key_states,
+    key_cache,
     threshold=0.5,
-    retain_ratio=0.2,
+    aggregation="mean",
+    normalization=False,
+    retain_num=None,
+    retain_ratio=None,
     retain_direction="last",
 ):
-    k = key_states[0]
+    k = key_cache[0]
     num_heads = k.shape[0]
 
     k_norm = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
@@ -53,8 +57,15 @@ def cal_similarity(
     # shape: [num_heads, seq_len, seq_len]
     similarity_mask = similarity_cos > threshold
 
-    seq_len = similarity_mask.size(-1)
-    k = int(seq_len * retain_ratio)
+    if retain_ratio is not None and retain_num is not None:
+        raise ValueError("retain_ratio and retain_num cannot be used together")
+    if retain_ratio is None and retain_num is None:
+        raise ValueError("retain_ratio or retain_num must be provided")
+    if retain_num is not None:
+        k = retain_num if retain_num is not None else 1
+    else:
+        seq_len = similarity_mask.size(-1)
+        k = int(seq_len * retain_ratio)  # 改为直接使用比例
 
     indices = torch.where(
         similarity_mask,
@@ -62,20 +73,17 @@ def cal_similarity(
         torch.zeros_like(similarity_mask, dtype=torch.long),
     )
 
-    # find the last True index in each row
     if retain_direction == "last":
+        # find the last True index in each row
         similarity_retain = torch.max(indices, dim=-1)[0]
-
-    # find the first True index in each row
     elif retain_direction == "first":
+        # find the first True index in each row
         similarity_retain = torch.min(indices, dim=-1)[0]
-
-    # keep the last_percent% elements
     elif retain_direction == "last_percent":
+        # 保留位置在后百分比的元素
         similarity_retain = torch.topk(indices, k=k, dim=-1)[0][:, :, 0]
-
-    # keep the first_percent% elements
     elif retain_direction == "first_percent":
+        # 保留位置在前百分比的元素
         similarity_retain = torch.topk(indices, k=k, dim=-1, largest=False)[0][:, :, -1]
 
     # create indices for zeroing
@@ -87,7 +95,16 @@ def cal_similarity(
     # zero the specified positions in similarity_cos
     similarity_cos[batch_idx, seq_idx, similarity_retain] = 0
 
-    return similarity_cos.mean(dim=1).softmax(dim=-1)
+    if aggregation == "mean":
+        similarity_cos = similarity_cos.mean(dim=1)
+    elif aggregation == "max":
+        similarity_cos = similarity_cos.max(dim=1).values
+
+
+    if normalization:
+        similarity_cos = similarity_cos.softmax(dim=-1)
+
+    return similarity_cos
 
 
 def merge_kv(key_states, value_states, indices, window_size, merge):

@@ -7,12 +7,13 @@ from ..attention.flashinfer_attention_headflatten import (
     read_kvcache,
     read_q_cache,
 )
-from src.services.nanovllm_v6.engine.sequence import Sequence
+from src.services.nanovllm_v7.engine.sequence import Sequence
 import torch
 
 import itertools
 
-from src.services.nanovllm_v6.utils.logging import get_log, set_log
+from src.services.nanovllm_v7.utils.context import get_context
+from src.services.nanovllm_v7.utils.logging import get_log, set_log
 # all implemntation here
 
 
@@ -38,7 +39,7 @@ class CacheManager(BaseService):
 
         self.compressor = compressor
 
-    def log_page_indices(self, seqs):
+    def allocate_page_indices(self, seqs):
         # move to model runner before capturing cuda graph
         self.cu_seqs = seqs
         occupied_pages = 0
@@ -47,7 +48,7 @@ class CacheManager(BaseService):
         ).to(torch.int32)
         occupied_pages = cu_page_indices.shape[0]
         seq_lens = torch.tensor(
-            [len(seq.block_table) for seq in self.cu_seqs]
+            [0] + [ + len(seq.block_table) for seq in self.cu_seqs]
         ).to(torch.int32)
         self.page_indices = cu_page_indices
         self.seq_lens = seq_lens
@@ -56,10 +57,15 @@ class CacheManager(BaseService):
         set_log(log)
         
     def update_indices(self):
-        self.prepare_metadata_for_attn(
-            self.seq_lens,
-            self.page_indices, 
-        )
+        if get_context().is_prefill:
+            self.prepare_metadata_for_attn_prefill(
+                self.cu_seqs
+            )
+        else:
+            self.prepare_metadata_for_attn_decode(
+                self.cu_seqs
+            )
+
 
     def update_indices_capture(self, bs: int):
         self.init_forward_metadata_capture_cuda_graph(

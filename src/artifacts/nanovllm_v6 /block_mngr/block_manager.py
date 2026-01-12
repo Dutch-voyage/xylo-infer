@@ -4,7 +4,7 @@ from collections import deque
 import xxhash
 import numpy as np
 
-from src.services.nanovllm_v5.engine.sequence import Sequence
+from src.services.nanovllm_v6.engine.sequence import Sequence
 
 from src.core.service_base import BaseService
 
@@ -57,16 +57,11 @@ class BlockManager(BaseService):
             block = self._allocate_block(block_id)
             block.update(token_ids)
             seq.block_table.append(block_id)
-
+    
     def deallocate(self, seq: Sequence):
         for block_id in reversed(seq.block_table):
             self._deallocate_block(block_id)
         seq.block_table.clear()
-        
-    def update_blocks_post_compression(self, seq: Sequence, layer_budget: int):
-        for block_id in reversed(seq.block_table[layer_budget:]):
-            self._deallocate_block(block_id)
-        seq.block_table = seq.block_table[:layer_budget]  
 
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
@@ -78,4 +73,4 @@ class BlockManager(BaseService):
         assert self.block_size == 1
         block_id = self.free_block_ids[0]
         self._allocate_block(block_id)
-        block_table.append(block_id)            
+        block_table.append(block_id)

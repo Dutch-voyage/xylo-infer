@@ -9,11 +9,12 @@ from ..config import Config
 from ..sampling_params import SamplingParams
 from .sequence import Sequence
 from .scheduler import Scheduler
-from src.services.nanovllm_v5.model_runner import ModelRunner
+from src.services.nanovllm_v7.model_runner import ModelRunner
 
-from src.services.nanovllm_v5.utils.logging import get_log, set_log, LogCollector, LogitsLog
-from src.services.nanovllm_v5.engine.io_struct import ModelRunnerOutput
+from src.services.nanovllm_v7.utils.logging import get_log, set_log, LogCollector, LogitsLog
+from src.services.nanovllm_v7.engine.io_struct import ModelRunnerOutput
 import numpy as np
+from rich import print as rprint
 
 class LLMEngine:
 
@@ -21,7 +22,9 @@ class LLMEngine:
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         self.config = config = Config(model, **config_kwargs)
-        if not config.enforce_eager and config.if_log_lse:
+        rprint(f"[LLMEngine] Initialized with config: \n{config.to_dict()}")
+        
+        if not config.enforce_eager and config.if_log_lse_in_attn:
             print("Warning: LSE cannot be logged when cuda graph is enabled.") 
         self.ps = []
         self.events = []
@@ -41,7 +44,6 @@ class LLMEngine:
         
         self.scheduler.block_manager._register_method("_deallocate_block", self.model_runner.cache_mngr)
         self.scheduler.block_manager._register_obj("blocks", self.model_runner.cache_mngr)
-        self.scheduler.block_manager._register_obj("update_blocks_post_compression", self.model_runner)
                 
         self.log_steps = []
         self.cur_step = 0
@@ -115,11 +117,12 @@ class LLMEngine:
             for seq_id, token_ids, logits in output:
                 outputs[seq_id] = (token_ids, logits)
             pbar.update(1)
-        if self.config.if_log_lse:
+        if self.config.if_log_compress:
             self.model_runner.call("save_lse_log")
-        if self.config.if_log_num_topp:
             self.model_runner.call("save_num_topp")
-        self.model_runner.call("reset")
+            self.model_runner.call("reset")
+        # self.cur_step = 32
+        
         self.log_collector.save(self.config.log_path)
         outputs = [outputs[seq_id] for seq_id in sorted(outputs)]
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids, "logits": logits} for token_ids, logits in outputs]

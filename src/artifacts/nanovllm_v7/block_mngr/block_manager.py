@@ -4,7 +4,7 @@ from collections import deque
 import xxhash
 import numpy as np
 
-from src.services.nanovllm_v6.engine.sequence import Sequence
+from src.services.nanovllm_v7.engine.sequence import Sequence
 
 from src.core.service_base import BaseService
 
@@ -57,7 +57,7 @@ class BlockManager(BaseService):
             block = self._allocate_block(block_id)
             block.update(token_ids)
             seq.block_table.append(block_id)
-
+    
     def deallocate(self, seq: Sequence):
         for block_id in reversed(seq.block_table):
             self._deallocate_block(block_id)
