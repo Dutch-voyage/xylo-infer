@@ -1,4 +1,6 @@
 import pickle
+from src.core.utils import cdiv
+from src.core.utils import cdiv
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -28,6 +30,9 @@ from src.artifacts.nanovllm_v7.cache_mngr.snapKV_revised import SnapKV
 # from src.artifacts.nanovllm_v7.cache_mngr.RKV import RKV
 from src.artifacts.nanovllm_v7.cache_mngr.RKV_revised_v2 import RKV
 # from src.artifacts.nanovllm_v7.cache_mngr.RKV_revised import RKV
+
+from src.artifacts.nanovllm_v7.cache_mngr.vanilla_topp import VanillaToppKV
+
 from src.artifacts.nanovllm_v7.cache_mngr.oMerging import OrthMerging
 from src.artifacts.nanovllm_v7.cache_mngr.oMerging_filter import OrthMerging as OrthMergingFilter
 from src.services.nanovllm_v7.model_runner.models.qwen3 import Qwen3AttentionArtifacts
@@ -88,6 +93,10 @@ class ModelRunner(BaseService):
             self.compressor = RKV(config, window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "snapkv":
             self.compressor = SnapKV(config, window_size=config.query_window_size, budget=config.layer_budget)
+        elif self.config.compress_method == "vanilla_topp": 
+            self.compressor = VanillaToppKV(
+                config, window_size=config.query_window_size, budget=config.layer_budget
+            )
         elif self.config.compress_method == "oMerge_filter":
             self.compressor = OrthMergingFilter(
                 window_size=config.query_window_size,
@@ -106,7 +115,7 @@ class ModelRunner(BaseService):
             )
         else:
             raise ValueError(f"Unknown compress method: {self.config.compress_method}")
-        
+                
         self.cache_mngr = CacheManager(self.attention_backend, config, self.compressor)
 
         self.cache_mngr._register_method("allocate_page_indices", self)
@@ -116,7 +125,10 @@ class ModelRunner(BaseService):
         self.cache_mngr._register_method("update_indices", self)
         self.cache_mngr._register_method("update_indices_capture", self)
         self.cache_mngr._register_method("update_indices_replay", self)
-
+        # self.cache_mngr._register_obj("cu_seqs", self)
+        
+        # self.cu_seqs = []
+        
         self.sampler = Sampler()
         global stage
         stage = RunningStage.WARMUP
@@ -228,6 +240,7 @@ class ModelRunner(BaseService):
         method = getattr(self, method_name, None)
         return method(*args)
 
+    # @torch.inference_mode()
     def compress(self):
         for module in self.model.modules():
             if (
@@ -250,9 +263,8 @@ class ModelRunner(BaseService):
         
         if self.config.if_fake_compress:
             return  
-        self.cu_seqs[0].block_table = self.cu_seqs[0].block_table[
-            : self.config.layer_budget
-        ]
+        for seq in self.cu_seqs:
+            self.update_blocks_post_compression(seq, self.config.layer_budget)
 
     def save_compress_distribution(self, steps):
         save_path = os.path.join(self.config.log_path, f"compress_distribution_{steps}.pt")
@@ -319,6 +331,11 @@ class ModelRunner(BaseService):
             hf_config.head_dim,
         )
 
+        if config.if_compress_kvcache and not config.if_fake_compress:
+            config.lazy_max_num_seqs = cdiv(config.num_kvcache_blocks, (config.layer_budget + config.steps_between_cache_compressions))
+        else:
+            config.lazy_max_num_seqs = cdiv(config.num_kvcache_blocks, config.max_model_len) 
+        
         layer_id = 0
         for module in self.model.modules():
             if (
@@ -566,6 +583,7 @@ class ModelRunner(BaseService):
         
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
         self.graph_bs = list(range(1, 32))
+        # self.graph_bs = [2]
         self.graphs = {}
         self.graph_pool = None
 

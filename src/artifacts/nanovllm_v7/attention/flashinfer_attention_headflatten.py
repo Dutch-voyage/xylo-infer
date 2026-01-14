@@ -221,7 +221,7 @@ class Attention(nn.Module, Artifact):
         self.custom_mask_buf = torch.zeros(
             (model_runner.config.hf_config.max_position_embeddings * max_bs,), dtype=torch.uint8, device=model_runner.device
         )
-        
+                
         self.mask_indptr_buf = torch.zeros(
             max_bs * num_kv_heads + 1, dtype=torch.int32, device=model_runner.device
         )
@@ -301,6 +301,8 @@ class Attention(nn.Module, Artifact):
         """See https://docs.flashinfer.ai/tutorials/kv_layout.html#page-table-layout for metadata required for flashinfer kernel"""
         headwise_seq_table = list(itertools.chain(*[seq.get_headwise_block_table() for seq in seqs]))
         
+        context = get_context()
+        
         kv_indptr = torch.cumsum(
             torch.tensor([0] + [len(table) for table in headwise_seq_table], device="cuda"),
             dim=0, dtype=torch.int32
@@ -316,9 +318,10 @@ class Attention(nn.Module, Artifact):
 
         qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32) # .to(torch.int32)
         
-        mask_arr = [torch.tensor(seq.headwise_mask, device="cuda", dtype=torch.uint8).transpose(0, 1).contiguous().view(-1) for seq in seqs]
+        # mask_arr = [torch.tensor(seq.headwise_mask, device="cuda", dtype=torch.uint8).transpose(0, 1).contiguous().view(-1) for seq in seqs]
         
-        packed_custom_mask = torch.cat(mask_arr, dim=0).contiguous().view(-1)
+        # packed_custom_mask = torch.cat(mask_arr, dim=0).contiguous().view(-1)
+        packed_custom_mask = context.packed_headwise_mask[0]
 
         self.decode_prefill_wrapper.plan(
             qo_indptr=qo_indptr, 
@@ -334,7 +337,26 @@ class Attention(nn.Module, Artifact):
         )
         
         self.forward_wrapper = self.decode_prefill_wrapper
+        self.partial_update_indices = self._partial_update_indices
 
+    def _partial_update_indices_cudagraph(self,
+                                          cu_packed_custom_mask: torch.Tensor,
+                                          mask_indptr: torch.Tensor,
+                                          ):
+        self.forward_wrapper._custom_mask_buf[:len(cu_packed_custom_mask)].copy_(cu_packed_custom_mask)
+    
+    def _partial_update_indices(self, 
+                                cu_packed_custom_mask: torch.Tensor,
+                                mask_indptr: torch.Tensor, 
+                                ):
+        self.forward_wrapper._custom_mask_buf = cu_packed_custom_mask.to(
+            self.forward_wrapper.device
+        )
+        
+        # self.forward_wrapper_mask_indptr_buf = mask_indptr.to(
+        #     self.forward_wrapper.device
+        # )
+    
     def _update_indices(self,
                         bs: int,
                         decode_wrapper: BatchDecodeWithPagedKVCacheWrapper,
@@ -343,8 +365,6 @@ class Attention(nn.Module, Artifact):
                         cu_page_indices: torch.Tensor,
                         cu_packed_custom_mask: torch.Tensor,
     ):
-
-        
         self.qo_indptr[: bs * self.num_kv_heads + 1] = cu_qo_indptr
         self.kv_indptr[: bs * self.num_kv_heads + 1] = cu_kv_indptr
         kv_indices_buf = decode_wrapper._paged_kv_indices_buf
@@ -396,6 +416,8 @@ class Attention(nn.Module, Artifact):
             cu_page_indices, 
             cu_packed_custom_mask
         )
+        
+        self.partial_update_indices = self._partial_update_indices_cudagraph
 
         self.decode_cuda_graph_metadata[bs] = decode_wrapper
         self.forward_wrapper = decode_wrapper
@@ -417,7 +439,7 @@ class Attention(nn.Module, Artifact):
             cu_packed_custom_mask
         )
 
-    def attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor): 
+    def attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_id: int): 
         o: torch.Tensor
         q = q.view(-1, self.num_heads, self.head_dim)
         k = k.view(-1, self.num_kv_heads, self.head_dim)
@@ -449,6 +471,7 @@ class Attention(nn.Module, Artifact):
                 )
                 o, _ = merge_state(o1, s1, o2, s2)
         else:    # decode
+            self.partial_update_indices(context.packed_headwise_mask[layer_id], context.mask_indptr[layer_id])
             store_q_cache(q, self.q_cache, context.query_slot_mapping, is_prefill=False)
             q = q.view(-1, self.num_kv_heads, self.num_heads // self.num_kv_heads, self.head_dim).view(-1, self.num_heads // self.num_kv_heads, self.head_dim)
             k_cache = self.k_cache.view(-1, 1, self.head_dim)

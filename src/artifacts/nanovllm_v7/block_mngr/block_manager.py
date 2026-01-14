@@ -57,6 +57,11 @@ class BlockManager(BaseService):
             block = self._allocate_block(block_id)
             block.update(token_ids)
             seq.block_table.append(block_id)
+            
+    def update_blocks_post_compression(self, seq: Sequence, layer_budget: int):
+        for block_id in reversed(seq.block_table[layer_budget:]):
+            self._deallocate_block(block_id)
+        seq.block_table = seq.block_table[:layer_budget]  
     
     def deallocate(self, seq: Sequence):
         for block_id in reversed(seq.block_table):

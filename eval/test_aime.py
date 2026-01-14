@@ -51,7 +51,7 @@ def generate_answer(local_dir="datasets", model_path="/home/yyx/models/Qwen3-4B"
         prompts = batch["raw_prompt"]
         ground_truth = batch["answer"]        
         outputs = llm.generate(prompts, sampling_params)
-
+        
         for idx in range(batch_size):
             output_ids = outputs[idx]["token_ids"]
             print(f"total output tokens {len(output_ids)}")
@@ -86,15 +86,15 @@ def generate_answer(local_dir="datasets", model_path="/home/yyx/models/Qwen3-4B"
     summary += "scores sum: " + str(total_scores) + "\n\n"
     summary += f"Average score: {total_scores / batch_size}" + "\n\n"
     summary += "Total generated tokens: " + str(total_generate_lengths) + "\n\n"
-    summary += f"Average generated tokens: {total_generate_lengths / batch_size}" + "\n\n"
+    summary += f"Average generated tokens: {total_generate_lengths / (batch_size * len(dataset))}" + "\n\n"
     with open("aime_baseline", "a") as f:
         f.write(summary)
     
     print("Evaluation completed.")
     print("scores sum:", total_scores)
-    print(f"Average score: {total_scores / batch_size}")
+    print(f"Average score: {total_scores / (batch_size * len(dataset))}")
     print("Total generated tokens:", total_generate_lengths)
-    print(f"Average generated tokens: {total_generate_lengths / batch_size}")
+    print(f"Average generated tokens: {total_generate_lengths / (batch_size * len(dataset))}")
     
     
 

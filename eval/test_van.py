@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from src.services.nanovllm_v6 import LLM, SamplingParams
+from src.services.nanovllm_v7 import LLM, SamplingParams
 from transformers import AutoTokenizer
 import os
 import datasets
@@ -119,21 +119,21 @@ def main():
     # LLM configuration
     parser.add_argument("--enforce_eager", type=str_to_bool, default=True, help="Enforce eager execution")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Tensor parallel size")
-    parser.add_argument("--if_log_compress", type=str_to_bool, default=True, help="Enable compression logging")
+    parser.add_argument("--if_log_compress", type=str_to_bool, default=False, help="Enable compression logging")
     parser.add_argument("--if_fake_compress", type=str_to_bool, default=False, help="Use fake compression for testing")
     parser.add_argument("--if_compress_kvcache", type=str_to_bool, default=True, help="Enable KV cache compression")
     parser.add_argument("--lse_preserve_merge", type=str_to_bool, default=False, help="Use LSE preserve merge method")
-    parser.add_argument("--compress_method", type=str, default="snapkv", help="Compression method")
+    parser.add_argument("--compress_method", type=str, default="rkv", help="Compression method")
     parser.add_argument("--layer_budget", type=int, default=512, help="Layer budget for compression")
     parser.add_argument("--query_window_size", type=int, default=32, help="Query window size")
     parser.add_argument("--steps_between_cache_compressions", type=int, default=32, help="Steps between cache compressions")
     parser.add_argument("--log_path", type=str, default="./test_logs", help="Path for log files")
-    parser.add_argument("--p_attn", type=float, default=0.90, help="Attention percentile")
+    parser.add_argument("--p_attn", type=float, default=0.99, help="Attention percentile")
     parser.add_argument("--attn_reduce_method", type=str, default="maxpool", help="Attention reduction method")
 
     # Sampling parameters
     parser.add_argument("--temperature", type=float, default=-1, help="Sampling temperature (-1 for greedy)")
-    parser.add_argument("--max_tokens", type=int, default=8192, help="Maximum number of output tokens")
+    parser.add_argument("--max_tokens", type=int, default=1024, help="Maximum number of output tokens")
 
     args = parser.parse_args()
 

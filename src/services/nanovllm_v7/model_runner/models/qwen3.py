@@ -137,7 +137,7 @@ class Qwen3Attention(nn.Module, BaseService):
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         # o = self.attn(q, k, v, self.layer_id)
-        o = self.attn(q, k, v)
+        o = self.attn(q, k, v, self.layer_id)
         output = self.o_proj(o)
         return output
 

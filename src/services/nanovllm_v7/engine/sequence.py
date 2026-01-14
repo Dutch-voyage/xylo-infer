@@ -2,6 +2,7 @@ from copy import copy
 from enum import Enum, auto
 from itertools import count
 import itertools
+from src.services.nanovllm_v1 import sampling_params
 import torch
 
 from ..sampling_params import SamplingParams
@@ -30,13 +31,14 @@ class Sequence:
     query_window_size = 128
     block_size = 1
     num_kv_heads = 8
+    num_layers = 36
     counter = count()
     cuda_graph_counter = count()
     
     def __init__(self):
         self.block_table: list[int] = []
         self.head_extend_block_table: list[int] = [] 
-        self.headwise_mask: list[int] = [] # uint8
+        self.headwise_mask_layer: dict[int, list[int]] = {}
         self.query_block_id: int = -1
         self.num_tokens: int = 0
         self.num_prompt_tokens: int = 0
@@ -48,7 +50,8 @@ class Sequence:
         seq.seq_id = next(Sequence.cuda_graph_counter)
         seq.block_table = block_table
         seq.head_extend_block_table = [[block_id * cls.num_kv_heads + i for i in range(cls.num_kv_heads)] for block_id in block_table]
-        seq.headwise_mask = [[2 ** i for i in range(cls.num_kv_heads)]] * len(block_table) 
+        for layer_id in range(cls.num_layers):
+            seq.headwise_mask_layer[layer_id] = [[2 ** i for i in range(cls.num_kv_heads)]] * len(block_table)
         seq.num_tokens = len(block_table) * cls.block_size
         return seq
     
@@ -68,7 +71,7 @@ class Sequence:
         
         seq.block_table = []
         seq.head_extend_block_table = []
-        seq.headwise_mask = []
+        seq.headwise_mask_layer = {layer_id: [] for layer_id in range(cls.num_layers)}
         seq.temperature = sampling_params.temperature
         seq.top_k = sampling_params.top_k
         seq.top_p = sampling_params.top_p
@@ -78,6 +81,28 @@ class Sequence:
     
         return seq
 
+    def copy_(self, seq):
+        self.block_size = seq.block_size
+        self.query_window_size = seq.query_window_size
+        self.seq_id = seq.seq_id
+        self.status = seq.status
+        self.token_ids = copy(seq.token_ids)
+        self.logits = copy(seq.logits)
+        self.last_token = seq.token_ids[-1]
+        self.num_tokens = len(self.token_ids)
+        self.num_prompt_tokens = len(seq.token_ids)
+        self.num_cached_tokens = 0
+        
+        self.block_table = copy(seq.block_table)
+        self.head_extend_block_table = copy(seq.head_extend_block_table)
+        self.headwise_mask_layer = {layer_id: copy(masks) for layer_id, masks in seq.headwise_mask_layer.items()}
+        self.temperature = seq.temperature
+        self.top_k = seq.top_k
+        self.top_p = seq.top_p
+        self.min_p = seq.min_p
+        self.max_tokens = seq.max_tokens
+        self.ignore_eos = seq.ignore_eos
+    
     def __len__(self):
         return self.num_tokens
 

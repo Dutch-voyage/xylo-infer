@@ -50,6 +50,8 @@ class RKV:
         bsz, num_heads, q_cache_len, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
         
+        assert bsz == 1, "Only support batch size 1 for now"
+        
         if kv_cache_len < self.budget:
             return {
                 "key_states": key_states, 

@@ -214,6 +214,8 @@ class ModelRunner(BaseService):
                 self.read_and_store_cache(
                     module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 )
+        if self.config.if_fake_compress:
+            return 
         
         for seq in self.cu_seqs:    
             self.update_blocks_post_compression(seq, self.config.layer_budget)

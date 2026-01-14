@@ -27,6 +27,8 @@ class Context:
     query_slot_mapping: torch.Tensor | None = None
     query_window_pos: torch.Tensor | None = None
     no_prefix: bool | None = None
+    packed_headwise_mask: dict[int, torch.Tensor] | None = None
+    mask_indptr: dict[int, torch.Tensor] | None = None
 
 
 _CONTEXT = Context()
@@ -35,6 +37,9 @@ _CONTEXT = Context()
 def get_context():
     return _CONTEXT
 
+def set_context_replace(context):
+    global _CONTEXT
+    _CONTEXT = context
 
 def set_context(
     is_prefill,

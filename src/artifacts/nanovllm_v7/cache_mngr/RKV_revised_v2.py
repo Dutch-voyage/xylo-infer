@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from src.services.nanovllm_v7.utils.logging import append_item_to_log
 
 from .utils import cal_similarity, compute_attention_scores, update_log
-from .lse_preserve_merge import merge_fixed_budget
+from .lse_preserve_merge import merge_fixed_budget, merge_multi_to_one
 from .binary_search import binary_search_T_linear, gradient_descent_T_linear
 
 
@@ -34,9 +34,7 @@ class RKV:
         self.lse_preserve_merge = config.lse_preserve_merge
         self.p_attn = config.p_attn
         self.if_log_compress = config.if_log_compress
-
-        # for recording kept token indices
-        self.record_kept_token_indices = record_kept_token_indices
+        
 
     def update_kv(
         self,
@@ -113,13 +111,21 @@ class RKV:
                 append_item_to_log("temperatures", T.reshape(-1).cpu())
             
             if self.lse_preserve_merge:
-                k_compress, v_compress = merge_fixed_budget(
+                # k_compress, v_compress = merge_fixed_budget(
+                #     attn_cache,
+                #     attn_weights_sum, 
+                #     self.budget - self.window_size - self.sink_size,
+                #     key_states[:, :, self.sink_size : -self.window_size, :],
+                #     value_states[:, :, self.sink_size : -self.window_size, :],
+                # )
+                k_compress, v_compress = merge_multi_to_one(
                     attn_cache,
                     attn_weights_sum, 
                     self.budget - self.window_size - self.sink_size,
                     key_states[:, :, self.sink_size : -self.window_size, :],
                     value_states[:, :, self.sink_size : -self.window_size, :],
                 )
+
             else:
                 indices = attn_cache.topk(
                     self.budget - self.window_size - self.sink_size, dim=-1

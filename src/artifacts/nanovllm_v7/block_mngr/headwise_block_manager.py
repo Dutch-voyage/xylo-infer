@@ -8,6 +8,8 @@ from src.services.nanovllm_v7.engine.sequence import Sequence
 
 from src.core.service_base import BaseService
 
+import torch
+
 class Block:
 
     def __init__(self, block_id):
@@ -19,6 +21,16 @@ class Block:
 
     def reset(self):
         self.token_ids = []
+
+def torch_rotr_uint8(x: torch.Tensor, k: int) -> torch.Tensor:
+    """
+    Performs a circular right shift of 'k' bits on a torch.uint8 tensor.
+    """
+    k = k % 8  # Handle rotations > 8
+    
+    # Note: We must cast the shift amount to the same dtype 
+    # or rely on PyTorch's scalar broadcasting.
+    return (x >> k) | (x << (8 - k))
 
 
 class BlockManager(BaseService):
@@ -45,6 +57,14 @@ class BlockManager(BaseService):
     def _deallocate_block(self, block_id: int) -> Block:
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
+        
+    def update_blocks_post_compression(self, seq: Sequence, layer_budget: int):
+        for block_id in reversed(seq.block_table[layer_budget:]):
+            self._deallocate_block(block_id)
+        seq.block_table = seq.block_table[:layer_budget]  
+        seq.head_extend_block_table = seq.head_extend_block_table[:layer_budget]
+        for layer_id in range(Sequence.num_layers):
+            seq.headwise_mask_layer[layer_id] = seq.headwise_mask_layer[layer_id][:layer_budget]
 
     def can_allocate(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= seq.num_blocks
@@ -58,14 +78,16 @@ class BlockManager(BaseService):
             block.update(token_ids)
             seq.block_table.append(block_id)
             seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
-            seq.headwise_mask.append([0xFF]) # 0b11111111, indicating the all heads in this block
+            for layer_id in range(Sequence.num_layers):
+                seq.headwise_mask_layer[layer_id].append([0xFF]) # 0b11111111, indicating the all heads in this block
     
     def deallocate(self, seq: Sequence):
         for block_id in reversed(seq.block_table):
             self._deallocate_block(block_id)
         seq.block_table.clear()
         seq.head_extend_block_table.clear()
-        seq.headwise_mask.clear()
+        for layer_id in range(Sequence.num_layers):
+            seq.headwise_mask_layer[layer_id].clear()
 
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
@@ -78,4 +100,5 @@ class BlockManager(BaseService):
         self._allocate_block(block_id)
         seq.block_table.append(block_id)
         seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
-        seq.headwise_mask.append([0xFF]) # 0b11111111, indicating the all heads in this block
+        for layer_id in range(Sequence.num_layers):
+            seq.headwise_mask_layer[layer_id].append([0xFF]) # 0b11111111, indicating the all heads in this block

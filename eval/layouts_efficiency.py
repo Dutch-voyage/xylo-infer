@@ -438,7 +438,7 @@ class BenchMark:
                 
                 cu_mask_max[layer_id] = torch.cat(cu_mask_max[layer_id], dim=0).contiguous().view(-1)
                 mask_max[layer_id].append(cu_mask_max[layer_id])
-                
+        
         if self.mode == "HS_sparse_prefill":
             for layer_id in range(num_layers):
                 cu_mask_sparse = torch.cat(mask_sparse[layer_id], dim=0).contiguous().view(-1)
@@ -446,7 +446,7 @@ class BenchMark:
                 self.packed_custom_mask[layer_id] = cu_packed_mask_sparse
             self.cu_page_lengths = torch.ones(
                 (num_seqs * num_kv_heads,), dtype=torch.int32, device="cuda"
-            ) * seq_length
+            ) * seq_length 
         
         if self.mode == "HS_flatten_sum_prefill":
             for layer_id in range(num_layers):
@@ -493,7 +493,7 @@ class BenchMark:
             
             for head_id in range(num_kv_heads):
                 block_table_ids_per_head = torch.randint(
-                    0, num_blocks, (seq_length,), device="cuda"
+                    0, num_blocks * num_kv_heads, (seq_length,), device="cuda"
                 )
                 block_table_ids.append(block_table_ids_per_head + head_id * num_blocks)
                 block_table_ids_max.append(block_table_ids_per_head[:seq_length_max] + head_id * num_blocks)
@@ -594,11 +594,11 @@ class BenchMark:
         num_reqs = self.cu_page_lengths.shape[0]
         kv_indptr = torch.zeros((self.cu_page_lengths.shape[0] + 1), device="cuda", dtype=torch.int32)
         kv_indptr[1:] = torch.cumsum(self.cu_page_lengths, dim=0)
-
+        
         kv_page_indices = torch.empty(
             kv_indptr[-1], dtype=torch.int32, device="cuda"
         )
-
+        
         create_flashinfer_kv_indices_triton[(num_reqs,)](
             self.global_block_table,
             torch.arange(num_reqs, device="cuda", dtype=torch.int32),
@@ -608,7 +608,7 @@ class BenchMark:
             kv_page_indices,
             self.global_block_table.shape[1],
         )
-                
+        
         kv_last_page_lens = self.kv_last_page_lens[:num_reqs]   
         qo_indptr = torch.arange(num_reqs + 1, device="cuda").to(torch.int32)
         
