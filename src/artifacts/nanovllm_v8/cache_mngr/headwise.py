@@ -19,70 +19,6 @@ from src.services.nanovllm_v8.utils.logging import get_log, set_log
 import triton
 import triton.language as tl
 
-def reverse_bits_uint8(x: torch.Tensor) -> torch.Tensor:
-        """Helper: Reverses bits (00000001 -> 10000000) for a uint8 tensor."""
-        x = ((x & 0xF0) >> 4) | ((x & 0x0F) << 4)
-        x = ((x & 0xCC) >> 2) | ((x & 0x33) << 2)
-        x = ((x & 0xAA) >> 1) | ((x & 0x55) << 1)
-        return x
-
-def transpose_uint8_bits(x: torch.Tensor, original_length=None) -> torch.Tensor:
-    """
-    Transposes a uint8 array of shape (N,) into shape (8, ceil(N/8)).
-    
-    Conceptually:
-    - Input: N bytes (N rows, 8 columns of bits)
-    - Output: 8 rows, ceil(N/8) columns (packed as bytes)
-    """
-    N = x.numel()
-    
-    # 1. Pad input to be a multiple of 8 bytes (required for int64 view)
-    pad_amt = (8 - (N % 8)) % 8
-    if pad_amt > 0:
-        x = torch.cat([x, torch.zeros(pad_amt, dtype=torch.uint8, device=x.device)])
-        
-    # 2. View as int64 blocks to process 8x8 bit blocks in parallel
-    #    We use int64 because it allows us to SWAR transpose 64 bits at once.
-    blocks = x.view(torch.int64)
-    
-    # 3. Perform 8x8 Bit Matrix Transpose (SWAR Algorithm)
-    #    This transposes the bits within every 64-bit block.
-    #    Note: We use signed int64 masks, but the logic holds for bit patterns.
-    
-    # Swap 1x1 adjacent bits
-    # Mask selects bits 1, 3, 5... of every byte
-    m1 = 0x00AA00AA00AA00AA 
-    t = (blocks ^ (blocks >> 7)) & m1
-    blocks = blocks ^ t ^ (t << 7)
-
-    # Swap 2x2 adjacent bit-pairs
-    # Mask selects bits 2,3, 6,7... of every byte
-    m2 = 0x0000CCCC0000CCCC
-    t = (blocks ^ (blocks >> 14)) & m2
-    blocks = blocks ^ t ^ (t << 14)
-
-    # Swap 4x4 adjacent bit-nibbles
-    # Mask selects upper nibble of alternating bytes
-    m4 = 0x00000000F0F0F0F0
-    t = (blocks ^ (blocks >> 28)) & m4
-    blocks = blocks ^ t ^ (t << 28)
-
-    # 4. Unpack and Reshape
-    #    At this point, 'blocks' contains transposed 8x8 grids.
-    #    However, in memory, they are interleaved.
-    #    We view back as uint8 -> shape (N_padded,)
-    #    Reshape to (num_blocks, 8) -> Transpose to (8, num_blocks)
-    
-    #    Output Row 0 corresponds to Byte 0 of every block.
-    #    Output Row 1 corresponds to Byte 1 of every block.
-    #    etc.
-    if original_length is None:
-        output = blocks.view(torch.uint8).reshape(-1, 8).t()
-    else:
-        output = blocks.view(torch.uint8).flatten()[:original_length]
-        
-    return output
-
 # Run optimized triton kernel
 def grid(batch_size, extend_len, BLOCK_SIZE):
     num_token_blocks = triton.cdiv(extend_len, BLOCK_SIZE)
@@ -247,6 +183,7 @@ class CacheManager(BaseService):
 
         self.seq_to_slot_pool = torch.zeros((config.max_num_seqs * self.num_kv_heads, config.max_model_len * self.num_kv_heads), dtype=torch.int32, device="cuda")
         
+        self.head_indices = torch.arange(0, self.num_kv_heads, dtype=torch.int32, device="cuda")
         
         self.cu_page_indices = self.cu_seq_lens = None
         
@@ -262,7 +199,6 @@ class CacheManager(BaseService):
         
     def allocate_prefill_page_indices(self, seqs: list[Sequence]):
         self.cu_seqs = seqs
-        # print(self.cu_seqs[0].block_table)
         for seq_id in seqs:
             self.seq_to_pool_id[seq_id.seq_id] = self.cu_seq_pool_id
             self.cu_seq_pool_id += 1
@@ -273,7 +209,7 @@ class CacheManager(BaseService):
         self.len_seqs = len(seqs)
         
         self.seq_lens = torch.tensor(
-            [len(seq.block_table) for seq in self.cu_seqs], #  * self.num_kv_heads, 
+            [seq.num_blocks for seq in self.cu_seqs], #  * self.num_kv_heads, 
             device="cuda"
         ).to(torch.int32)
         
@@ -290,85 +226,7 @@ class CacheManager(BaseService):
             self.len_seqs,
             self.max_context_len * self.num_kv_heads,
         ) 
-    
-    def update_masks(self, seqs):
-        for layer_id in range(self.num_layers):
-            seq_bit_mask = [torch.tensor(seq.headwise_mask_layer[layer_id], device="cuda", dtype=torch.uint8).transpose(0, 1).contiguous().view(-1) for seq in seqs]
-
-            self.mask_arr[layer_id] = [transpose_uint8_bits(m) for m in seq_bit_mask]
             
-            self.mask_indptr[layer_id] = torch.cumsum(torch.tensor([0] + list(itertools.chain(*[[m.shape[-1]] * self.num_kv_heads for m in self.mask_arr[layer_id]])), device="cuda"), dim=0)
-                        
-            self.cu_packed_custom_mask[layer_id] = torch.cat([m.contiguous().view(-1) for m in self.mask_arr[layer_id]], dim=0)
-        
-    def _optimized_transpose_pad_batch(self, inputs: list[list[int]]):
-        """
-        Optimized helper to handle:
-        1. CPU Tensor creation
-        2. Padding to 8-byte boundary (required for SWAR)
-        3. Flattening and Batching
-        """
-        # 1. Pre-calculate sizes to allocate memory once
-        # Assuming input m is shaped (heads, seq_len) or similar linear list
-        # We need to replicate: torch.tensor(m).transpose(0,1).contiguous().view(-1)
-        # We assume the input list `m` is row-major on CPU. 
-        # Note: If inputs are pure python lists, we flatten them efficiently.
-        
-        flat_tensors = []
-        padded_lengths = []
-        original_lengths = []
-
-        # We stick to CPU for list processing to avoid CUDA sync overhead
-        for m in inputs:
-            # Create tensor on CPU. 
-            # Dtype uint8 is crucial. 
-            # Note: We must match the original .transpose(0,1) logic.
-            # Assuming m is a list of lists:
-            t = torch.tensor(m, dtype=torch.uint8, device="cuda")
-            if t.ndim == 2:
-                t = t.transpose(0, 1)
-            t = t.contiguous().view(-1)
-            
-            original_len = t.numel()
-            original_lengths.append(original_len)
-            
-            # Pad to 8 bytes for SWAR algo
-            pad_amt = (8 - (original_len % 8)) % 8
-            if pad_amt > 0:
-                t = torch.cat([t, torch.zeros(pad_amt, dtype=torch.uint8, device="cuda")])
-            
-            flat_tensors.append(t)
-            padded_lengths.append(t.numel())
-
-        # 2. Create one large pinned/contiguous buffer
-        batch_input = torch.cat(flat_tensors)
-        
-        return batch_input, padded_lengths, original_lengths
-
-    def _swar_transpose_batch(self, blocks: torch.Tensor):
-        """
-        Applies SWAR bit-transpose in-place on a large Int64 view.
-        """
-        # View as int64 to process 8x8 bit blocks in parallel
-        blocks = blocks.view(torch.int64)
-
-        # Mask selects bits 1, 3, 5... of every byte
-        m1 = 0x00AA00AA00AA00AA
-        t = (blocks ^ (blocks >> 7)) & m1
-        blocks = blocks ^ t ^ (t << 7)
-
-        # Mask selects bits 2,3, 6,7... of every byte
-        m2 = 0x0000CCCC0000CCCC
-        t = (blocks ^ (blocks >> 14)) & m2
-        blocks = blocks ^ t ^ (t << 14)
-
-        # Mask selects upper nibble of alternating bytes
-        m4 = 0x00000000F0F0F0F0
-        t = (blocks ^ (blocks >> 28)) & m4
-        blocks = blocks ^ t ^ (t << 28)
-        
-        return blocks
-
     def update_masks_optimized(self, seqs):
         # for layer_id in range(self.num_layers):
 
@@ -387,15 +245,12 @@ class CacheManager(BaseService):
         # sglang says when using overlap mode, should not in-place operation, need to investigate, here is non-overlap mode 
         self.cu_seqs = seqs
         
-        # print(f"in allocate {id(self.cu_seqs[0])}")
-        # print(f"in allocate len {self.cu_seqs[0].block_table}")
-
         self.cu_seqs_to_slot_pool_indices = torch.tensor([self.seq_to_pool_id[seq_id.seq_id] for seq_id in seqs], device="cuda", dtype=torch.int32)
         
         self.len_seqs = len(seqs)
         
         self.seq_lens = torch.tensor(
-            [len(seq.block_table) for seq in self.cu_seqs], #  * self.num_kv_heads, 
+            [seq.num_blocks for seq in self.cu_seqs], #  * self.num_kv_heads, 
             device="cuda"
         ).to(torch.int32)
 
@@ -403,11 +258,9 @@ class CacheManager(BaseService):
         
         cu_slot_mapping = context.slot_mapping
         
-        head_indices = torch.arange(0, self.num_kv_heads, dtype=torch.int32, device="cuda")
+        cu_slot_mapping_headwise = ((cu_slot_mapping * self.num_kv_heads)[:, None] + self.head_indices[None, :])
         
-        cu_slot_mapping_headwise = ((cu_slot_mapping * self.num_kv_heads)[:, None] + head_indices[None, :])
-        
-        seq_to_pool_indices_headwise = (self.cu_seqs_to_slot_pool_indices[:, None] * self.num_kv_heads) + head_indices[None, :]
+        seq_to_pool_indices_headwise = (self.cu_seqs_to_slot_pool_indices[:, None] * self.num_kv_heads) + self.head_indices[None, :]
         
         seq_lens_headwise = ((self.seq_lens - 1)[:, None]) # + head_indices[None, :]
         
@@ -452,7 +305,7 @@ class CacheManager(BaseService):
         self.cu_seqs = seqs
         
         self.seq_lens = torch.tensor(
-            [len(seq.block_table) for seq in self.cu_seqs]
+            [seq.num_blocks for seq in self.cu_seqs]
         ).to(torch.int32)
         
         headwise_seq_table = list(itertools.chain(*[seq.get_headwise_block_table() for seq in seqs]))
@@ -513,85 +366,89 @@ class CacheManager(BaseService):
             self.cu_packed_custom_mask_optimized[0]
         )
     
-    def read_and_store_cache_iterative(self, q_cache, k_cache, v_cache, layer_id):
-        total_steps = (len(self.cu_seqs[0].block_table) - self.compressor.budget) // self.config.steps_between_cache_compressions + 1
-        for i in range(total_steps):
-            start = i * self.config.steps_between_cache_compressions + self.compressor.budget
-            end = min(start + self.config.steps_between_cache_compressions, len(self.cu_seqs[0].block_table))
-            slot_mappings = self.cu_seqs[0].block_table[:self.compressor.budget] + self.cu_seqs[0].block_table[start:end]
-            assert len(self.cu_seqs) == 1, "Currently only support single request"
+    # def read_and_store_cache_iterative(self, q_cache, k_cache, v_cache, layer_id):
+    #     total_steps = (self.cu_seqs[0].num_blocks - self.compressor.budget) // self.config.steps_between_cache_compressions + 1
+    #     for i in range(total_steps):
+    #         start = i * self.config.steps_between_cache_compressions + self.compressor.budget
+    #         end = min(start + self.config.steps_between_cache_compressions, self.cu_seqs[0].num_blocks)
+    #         slot_mappings = self.cu_seqs[0].block_table[:self.compressor.budget] + self.cu_seqs[0].block_table[start:end]
+    #         assert len(self.cu_seqs) == 1, "Currently only support single request"
 
-            slot_mappings_tensor = torch.tensor(slot_mappings, device="cuda").to(
-                torch.int32
-            )
+    #         slot_mappings_tensor = torch.tensor(slot_mappings, device="cuda").to(
+    #             torch.int32
+    #         )
             
-            query_slot_mapping = [self.cu_seqs[0].query_block_id]
+    #         query_slot_mapping = [self.cu_seqs[0].query_block_id]
 
-            query_slot_mapping_tensor = torch.tensor(query_slot_mapping, device="cuda").to(
-                torch.int32
-            )
+    #         query_slot_mapping_tensor = torch.tensor(query_slot_mapping, device="cuda").to(
+    #             torch.int32
+    #         )
 
-            query = read_q_cache(
-                q_cache=q_cache,
-                query_slot_mapping=query_slot_mapping_tensor,
-            )
+    #         query = read_q_cache(
+    #             q_cache=q_cache,
+    #             query_slot_mapping=query_slot_mapping_tensor,
+    #         )
 
-            key, value = read_kvcache(
-                k_cache=k_cache,
-                v_cache=v_cache,
-                slot_mapping=slot_mappings_tensor,
-                num_kv_heads=self.num_kv_heads, 
-                head_dim=self.head_dim
-            )
+    #         key, value = read_kvcache(
+    #             k_cache=k_cache,
+    #             v_cache=v_cache,
+    #             slot_mapping=slot_mappings_tensor,
+    #             num_kv_heads=self.num_kv_heads, 
+    #             head_dim=self.head_dim
+    #         )
             
-            key = key.unsqueeze(0)
-            value = value.unsqueeze(0)
+    #         key = key.unsqueeze(0)
+    #         value = value.unsqueeze(0)
 
-            updated_k, updated_v = self.compressor.update_kv(
-                query.transpose(1, 2),
-                key.transpose(1, 2),
-                value.transpose(1, 2),
-                self.cu_seqs[0],
-                layer_id, 
-            )
+    #         updated_k, updated_v = self.compressor.update_kv(
+    #             query.transpose(1, 2),
+    #             key.transpose(1, 2),
+    #             value.transpose(1, 2),
+    #             self.cu_seqs[0],
+    #             layer_id, 
+    #         )
 
-            key = updated_k.transpose(1, 2).squeeze(0).contiguous()
-            value = updated_v.transpose(1, 2).squeeze(0).contiguous()
+    #         key = updated_k.transpose(1, 2).squeeze(0).contiguous()
+    #         value = updated_v.transpose(1, 2).squeeze(0).contiguous()
 
-            slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
+    #         slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
             
-            store_kvcache(
-                key=key,
-                value=value,
-                k_cache=k_cache,
-                v_cache=v_cache,
-                slot_mapping=slot_mappings_tensor,
-            )
+    #         store_kvcache(
+    #             key=key,
+    #             value=value,
+    #             k_cache=k_cache,
+    #             v_cache=v_cache,
+    #             slot_mapping=slot_mappings_tensor,
+    #         )
     
     def _packed_read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):        
         # print(f"in compress {id(self.cu_seqs[0])}")
         # print(f"in compress len {self.cu_seqs[0].block_table}")
-        slot_mappings_packed = list(
-            itertools.chain(
-                *[seq.block_table for seq in self.cu_seqs]
-            )
-        )
+        # slot_mappings_packed = list(
+        #     itertools.chain(
+        #         *[seq.block_table for seq in self.cu_seqs]
+        #     )
+        # )
                 
-        slot_mappings_packed_store = list(
-            itertools.chain(
-                *[seq.block_table[:self.layer_budget] for seq in self.cu_seqs]
-            )
-        )
+        # slot_mappings_packed_store = list(
+        #     itertools.chain(
+        #         *[seq.block_table[:self.layer_budget] for seq in self.cu_seqs]
+        #     )
+        # )
         
-        slot_mappings_packed = torch.tensor(slot_mappings_packed, device="cuda").to(
-            torch.int32
-        )
+        # slot_mappings_packed = torch.tensor(slot_mappings_packed, device="cuda").to(
+        #     torch.int32
+        # )
         
-        slot_mappings_packed_store = torch.tensor(slot_mappings_packed_store, device="cuda").to(
-            torch.int32
-        )
+        # slot_mappings_packed_store = torch.tensor(slot_mappings_packed_store, device="cuda").to(
+        #     torch.int32
+        # )
         
-        seq_lens = torch.tensor([0] + [len(seq.block_table) for seq in self.cu_seqs], device="cuda").to(
+        slot_mappings_packed = torch.cat([self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id], :seq.num_blocks] for seq in self.cu_seqs], dim=0).to(torch.int32)
+        
+        slot_mappings_packed_store = torch.cat([self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id], :self.layer_budget] for seq in self.cu_seqs], dim=0).to(torch.int32)
+        
+        seq_lens = torch.tensor([0] + [seq.num_blocks for seq in self.cu_seqs], device="cuda").to(
             torch.int32
         )
         seq_lens_cumsum = torch.cumsum(seq_lens, dim=0)
@@ -654,66 +511,3 @@ class CacheManager(BaseService):
     
     def read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
         return self._packed_read_and_store_cache(q_cache, k_cache, v_cache, layer_id)
-    
-    def _read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
-        """
-        option 1: per-sequence handling
-
-        option 2: like flashinfer's layout, handling with packed indices,
-        """
-        slot_mappings = self.cu_seqs[0].block_table
-
-        assert len(self.cu_seqs) == 1, "Currently only support single request"
-
-        slot_mappings_tensor = torch.tensor(slot_mappings, device="cuda").to(
-            torch.int32
-        )
-        
-        query_slot_mapping = [self.cu_seqs[0].query_block_id]
-
-        query_slot_mapping_tensor = torch.tensor(query_slot_mapping, device="cuda").to(
-            torch.int32
-        )
-
-        query = read_q_cache(
-            q_cache=q_cache,
-            query_slot_mapping=query_slot_mapping_tensor,
-        )
-        
-        key, value = read_kvcache(
-            k_cache=k_cache,
-            v_cache=v_cache,
-            slot_mapping=slot_mappings_tensor,
-            num_kv_heads=self.num_kv_heads,
-            head_dim=self.head_dim
-        )
-        
-        key = key.unsqueeze(0)
-        value = value.unsqueeze(0)
-
-        ret = self.compressor.update_kv(
-            query.transpose(1, 2),
-            key.transpose(1, 2),
-            value.transpose(1, 2),
-            self.cu_seqs[0],
-            layer_id, 
-        )
-        
-        if self.if_fake_compress:
-            return 
-        
-        updated_k = ret["key_states"]
-        updated_v = ret["value_states"]
-
-        key = updated_k.transpose(1, 2).squeeze(0).contiguous()
-        value = updated_v.transpose(1, 2).squeeze(0).contiguous()
-        
-        slot_mappings_tensor = slot_mappings_tensor[: key.shape[0]]
-        
-        store_kvcache(
-            key=key,
-            value=value,
-            k_cache=k_cache,
-            v_cache=v_cache,
-            slot_mapping=slot_mappings_tensor,
-        )

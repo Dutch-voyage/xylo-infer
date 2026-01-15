@@ -49,16 +49,16 @@ class BlockManager(BaseService):
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
         
-    def update_blocks_post_compression(self, seq: Sequence, layer_budget: int):
-        for block_id in reversed(seq.block_table[layer_budget:]):
+    def update_blocks_post_compression(self, seq: Sequence):
+        for block_id in reversed(seq.block_table[seq.num_blocks:]):
             self._deallocate_block(block_id)
-        seq.block_table = seq.block_table[:layer_budget]  
-        seq.head_extend_block_table = seq.head_extend_block_table[:layer_budget]
+        seq.block_table = seq.block_table[:seq.num_blocks]  
+        seq.head_extend_block_table = seq.head_extend_block_table[:seq.num_blocks]
         
         # NOTE need further design
         
-        # for layer_id in range(Sequence.num_layers):
-        #     seq.headwise_mask_layer[layer_id] = seq.headwise_mask_layer[layer_id][:layer_budget]
+        for layer_id in range(Sequence.num_layers):
+            seq.headwise_mask_layer_transpose[layer_id] = seq.headwise_mask_layer_transpose[layer_id][:(seq.num_blocks + 7) // 8]
 
     def can_allocate(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= seq.num_blocks
@@ -104,6 +104,7 @@ class BlockManager(BaseService):
         # NOTE when the block == 1, the handling logic is different 
         assert self.block_size == 1
         block_id = self.free_block_ids[0]
+        seq.num_blocks += 1
         self._allocate_block(block_id)
         seq.block_table.append(block_id)
         seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
