@@ -23,7 +23,6 @@ class Block:
         self.token_ids = []
 
 
-
 class BlockManager(BaseService):
     num_kv_heads = 8
     @property
@@ -58,8 +57,7 @@ class BlockManager(BaseService):
         
         # NOTE need further design
         
-        for layer_id in range(Sequence.num_layers):
-            seq.headwise_mask_layer_transpose[layer_id] = seq.headwise_mask_layer_transpose[layer_id][:(seq.num_blocks + 7) // 8]
+        seq.headwise_mask_layer_transpose = seq.headwise_mask_layer_transpose[..., :(seq.num_blocks + 7) // 8]
 
     def can_allocate(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= seq.num_blocks
