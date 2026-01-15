@@ -348,16 +348,6 @@ class ModelRunner(BaseService):
                 module.q_cache = self.q_cache[layer_id]
                 layer_id += 1
 
-    def prepare_block_tables(self, seqs: list[Sequence]):
-        max_len = max(len(seq.block_table) for seq in seqs)
-        block_tables = [
-            seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs
-        ]
-        block_tables = torch.tensor(
-            block_tables, dtype=torch.int32, pin_memory=True
-        ).cuda(non_blocking=True)
-        return block_tables
-
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids = []
         positions = []
@@ -368,7 +358,6 @@ class ModelRunner(BaseService):
         slot_mapping = []
         query_window_pos = []
         query_slot_mapping = []
-        block_tables = None
 
         for seq in seqs:
             seqlen = len(seq)
@@ -406,8 +395,6 @@ class ModelRunner(BaseService):
                 else:
                     end = start + seq.last_block_num_tokens
                 slot_mapping.extend(list(range(start, end)))
-        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:  # prefix cache
-            block_tables = self.prepare_block_tables(seqs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
             non_blocking=True
         )
@@ -439,7 +426,6 @@ class ModelRunner(BaseService):
             max_seqlen_k,
             slot_mapping,
             None,
-            block_tables,
             query_slot_mapping,
             query_window_pos,
         )
@@ -488,7 +474,6 @@ class ModelRunner(BaseService):
         context_lens = torch.tensor(
             context_lens, dtype=torch.int32, pin_memory=True
         ).cuda(non_blocking=True)
-        block_tables = self.prepare_block_tables(seqs)
 
         query_slot_mapping = torch.tensor(
             query_slot_mapping, dtype=torch.int32, pin_memory=True
@@ -498,7 +483,6 @@ class ModelRunner(BaseService):
             False,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
-            block_tables=block_tables,
             query_slot_mapping=query_slot_mapping,
         )
 
@@ -543,9 +527,6 @@ class ModelRunner(BaseService):
             graph_vars["slot_mapping"][:bs] = context.slot_mapping
             graph_vars["query_slot_mapping"][:bs] = context.query_slot_mapping
             graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][
-                :bs, : context.block_tables.size(1)
-            ] = context.block_tables
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
@@ -571,13 +552,11 @@ class ModelRunner(BaseService):
         config = self.config
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)
-        max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
         input_ids = torch.zeros(max_bs, dtype=torch.int64)
         positions = torch.zeros(max_bs, dtype=torch.int64)
         slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
         query_slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
-        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
 
         seqs = [Sequence.for_capture([0]) for _ in range(max_bs)]
         
@@ -593,7 +572,6 @@ class ModelRunner(BaseService):
                 False,
                 slot_mapping=slot_mapping[:bs],
                 context_lens=context_lens[:bs],
-                block_tables=block_tables[:bs],
                 query_slot_mapping=query_slot_mapping[:bs],
             )
             # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
@@ -614,6 +592,5 @@ class ModelRunner(BaseService):
             slot_mapping=slot_mapping,
             query_slot_mapping=query_slot_mapping,
             context_lens=context_lens,
-            block_tables=block_tables,
             outputs=outputs,
         )

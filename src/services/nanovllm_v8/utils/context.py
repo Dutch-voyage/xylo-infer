@@ -23,7 +23,6 @@ class Context:
     max_seqlen_k: int = 0
     slot_mapping: torch.Tensor | None = None
     context_lens: torch.Tensor | None = None
-    block_tables: torch.Tensor | None = None
     query_slot_mapping: torch.Tensor | None = None
     query_window_pos: torch.Tensor | None = None
     no_prefix: bool | None = None
@@ -49,7 +48,6 @@ def set_context(
     max_seqlen_k=0,
     slot_mapping=None,
     context_lens=None,
-    block_tables=None,
     query_slot_mapping=None,
     query_window_pos=None,
     no_prefix=None, 
@@ -68,7 +66,6 @@ def set_context(
         max_seqlen_k=max_seqlen_k,
         slot_mapping=slot_mapping,
         context_lens=context_lens,
-        block_tables=block_tables,
         query_slot_mapping=query_slot_mapping,
         query_window_pos=query_window_pos,
         no_prefix=no_prefix,
