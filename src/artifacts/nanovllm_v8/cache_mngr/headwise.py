@@ -7,13 +7,13 @@ from ..attention.flashinfer_attention_headflatten import (
     read_kvcache,
     read_q_cache,
 )
-from src.services.nanovllm_v7.engine.sequence import Sequence
+from src.services.nanovllm_v8.engine.sequence import Sequence
 import torch
 
 import itertools
 
-from src.services.nanovllm_v7.utils.context import get_context, set_context_replace
-from src.services.nanovllm_v7.utils.logging import get_log, set_log
+from src.services.nanovllm_v8.utils.context import get_context, set_context_replace
+from src.services.nanovllm_v8.utils.logging import get_log, set_log
 # all implemntation here
 
 import triton
@@ -247,6 +247,7 @@ class CacheManager(BaseService):
 
         self.seq_to_slot_pool = torch.zeros((config.max_num_seqs * self.num_kv_heads, config.max_model_len * self.num_kv_heads), dtype=torch.int32, device="cuda")
         
+        
         self.cu_page_indices = self.cu_seq_lens = None
         
         self.full_headwise_mask_per_token = torch.tensor([2 ** i for i in range(self.num_kv_heads)], device="cuda", dtype=torch.uint8)
@@ -370,58 +371,11 @@ class CacheManager(BaseService):
 
     def update_masks_optimized(self, seqs):
         for layer_id in range(self.num_layers):
-            # 1. Gather raw data on CPU
-            raw_masks = [seq.headwise_mask_layer[layer_id] for seq in seqs]
             
-            # 2. Prepare batched input (CPU -> GPU)
-            batch_input_gpu, padded_lens, original_lens = self._optimized_transpose_pad_batch(raw_masks)
+            self.mask_arr[layer_id] = [torch.tensor(seq.headwise_mask_layer_transpose[layer_id], device="cuda", dtype=torch.uint8) for seq in seqs]
+                                                
+            self.cu_packed_custom_mask[layer_id] = torch.cat([m.contiguous().view(-1) for m in self.mask_arr[layer_id]], dim=0)
             
-            # Move to GPU once per layer
-            # batch_input_gpu = batch_input_cpu.to(device="cuda", non_blocking=True)
-            
-            # 3. Run Vectorized SWAR (Bit Transpose)
-            transposed_blocks = self._swar_transpose_batch(batch_input_gpu)
-            
-            # 4. Unpack and Slice
-            # The SWAR output is packed 64-bit blocks. We view as uint8.
-            # Shape: (Total_Blocks, 8)
-            unpacked_bytes = transposed_blocks.view(torch.uint8).view(-1, 8)
-            
-            final_masks = []
-            
-            cursor = 0
-            for p_len in padded_lens:
-                num_blocks = p_len // 8
-                
-                # Extract the blocks belonging to this sequence
-                seq_blocks = unpacked_bytes[cursor : cursor + num_blocks]
-                
-                # Transpose to get (8, num_blocks)
-                # CHANGE: Removed .view(-1). We keep it 2D (8, N) to match original semantics.
-                transposed = seq_blocks.t().contiguous() 
-                
-                final_masks.append(transposed)
-                cursor += num_blocks
-            
-            self.mask_arr[layer_id] = final_masks
-            
-            # 5. Indptr and Packing
-            # Since m is now (8, N), m.shape[-1] is N (bytes per head). 
-            # This is correct. The previous flattened version made this 8*N (wrong).
-            
-            sizes = []
-            for m in final_masks:
-                # m.shape[-1] correctly grabs the width (seq_len_packed)
-                sizes.extend([m.shape[-1]] * self.num_kv_heads)
-                
-            self.mask_indptr[layer_id] = torch.cumsum(
-                torch.tensor([0] + sizes, device="cuda"), dim=0
-            )
-
-            # Final Concatenation
-            # We flatten here just for the packed mask, which is safe.
-            self.cu_packed_custom_mask[layer_id] = torch.cat([m.view(-1) for m in final_masks], dim=0)
-
     def allocate_decode_page_indices(self, seqs: list[Sequence]):
         # sglang says when using overlap mode, should not in-place operation, need to investigate, here is non-overlap mode 
         self.cu_seqs = seqs
@@ -516,20 +470,14 @@ class CacheManager(BaseService):
 
         self.cu_qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32)# .to(torch.int32)
 
-        
-        
         for layer_id in range(self.num_layers):
-            seq_bit_mask = [torch.tensor(seq.headwise_mask_layer[layer_id], device="cuda", dtype=torch.uint8).transpose(0, 1).contiguous().view(-1) for seq in seqs]
             
-            self.mask_arr[layer_id] = [transpose_uint8_bits(m) for m in seq_bit_mask]
-            
-            self.mask_indptr[layer_id] = torch.cumsum(torch.tensor([0] + list(itertools.chain(*[[m.shape[-1]] * self.num_kv_heads for m in self.mask_arr[layer_id]])), device="cuda"), dim=0)
-                        
+            self.mask_arr[layer_id] = [torch.tensor(seq.headwise_mask_layer_transpose[layer_id], device="cuda", dtype=torch.uint8) for seq in seqs]
+                                                
             self.cu_packed_custom_mask[layer_id] = torch.cat([m.contiguous().view(-1) for m in self.mask_arr[layer_id]], dim=0)
         
         context = get_context()
         context.packed_headwise_mask = self.cu_packed_custom_mask
-        context.mask_indptr = self.mask_indptr
         set_context_replace(context)
         
         self.log_occupied_pages(self.cu_kv_page_indices.shape[0])
@@ -688,10 +636,12 @@ class CacheManager(BaseService):
             
             if "packed_selected_mask" in ret:
                 self.mask_arr[layer_id][i] = self.mask_arr[layer_id][i].clone() & ret["packed_selected_mask"]
+                
+                self.cu_seqs[i].headwise_mask_layer_transpose[layer_id] = [list(item.unbind(0)) for item in list(self.mask_arr[layer_id][i].to("cpu").unbind(0))]
                 # print(ret["packed_selected_mask"])
-                headwise_mask_i = transpose_uint8_bits(self.mask_arr[layer_id][i].transpose(0, 1).reshape(-1), original_length=len(self.cu_seqs[i].headwise_mask_layer[layer_id]))          
-                # print(headwise_mask_i)
-                self.cu_seqs[i].headwise_mask_layer[layer_id] = headwise_mask_i.unsqueeze(-1).tolist()
+                # headwise_mask_i = transpose_uint8_bits(self.mask_arr[layer_id][i].transpose(0, 1).reshape(-1), original_length=len(self.cu_seqs[i].headwise_mask_layer[layer_id]))          
+                # # print(headwise_mask_i)
+                # self.cu_seqs[i].headwise_mask_layer[layer_id] = headwise_mask_i.unsqueeze(-1).tolist()
                             
             updated_k_list.append(updated_k.transpose(1, 2).squeeze(0).contiguous())
             updated_v_list.append(updated_v.transpose(1, 2).squeeze(0).contiguous())
