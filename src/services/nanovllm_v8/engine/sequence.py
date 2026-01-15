@@ -41,8 +41,7 @@ class Sequence:
     def __init__(self):
         self.block_table: list[int] = []
         self.head_extend_block_table: list[int] = [] 
-        self.headwise_mask_layer_transpose: dict[int, list[list[int]]] = {layer_id: 
-            [[] for _ in range(self.num_kv_heads)] for layer_id in range(self.num_layers)}
+        self.headwise_mask_layer_transpose: dict[int, list[list[int]]] = torch.zeros((self.num_layers, self.num_kv_heads, 1), device="cpu", dtype=torch.uint8)
         self.query_block_id: int = -1
         self.num_tokens: int = 0
         self.num_prompt_tokens: int = 0
@@ -55,9 +54,7 @@ class Sequence:
         seq.seq_id = next(Sequence.cuda_graph_counter)
         seq.block_table = block_table
         seq.head_extend_block_table = [[block_id * cls.num_kv_heads + i for i in range(cls.num_kv_heads)] for block_id in block_table]
-        for layer_id in range(cls.num_layers):
-            seq.headwise_mask_layer_transpose[layer_id] = [[0b00000001]] * cls.num_kv_heads
-        
+        seq.headwise_mask_layer_transpose = torch.zeros((cls.num_layers, cls.num_kv_heads, len(block_table)), device="cpu", dtype=torch.uint8)        
             
         seq.num_tokens = len(block_table) * cls.block_size
         return seq
@@ -81,8 +78,7 @@ class Sequence:
         
         seq.block_table = []
         seq.head_extend_block_table = []
-        seq.headwise_mask_layer_transpose = {layer_id: 
-            [[] for _ in range(cls.num_kv_heads)] for layer_id in range(cls.num_layers)}
+        seq.headwise_mask_layer_transpose = torch.zeros((cls.num_layers, cls.num_kv_heads, 1), device="cpu", dtype=torch.uint8)
         seq.temperature = sampling_params.temperature
         seq.top_k = sampling_params.top_k
         seq.top_p = sampling_params.top_p

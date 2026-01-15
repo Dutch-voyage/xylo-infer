@@ -72,14 +72,20 @@ class BlockManager(BaseService):
             block.update(token_ids)
             seq.block_table.append(block_id)
             seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
-            for layer_id in range(Sequence.num_layers):
-                list_ref = seq.headwise_mask_layer_transpose[layer_id]
-                if seq.next_mask == 0b00000001:
-                    for list_i in list_ref:
-                        list_i.append(seq.next_mask)
-                else:
-                    for list_i in list_ref:   
-                        list_i[-1] = list_i[-1] + seq.next_mask
+            if seq.next_mask == 0b00000001 and i != 0:
+                seq.headwise_mask_layer_transpose = torch.cat(
+                    [seq.headwise_mask_layer_transpose, torch.ones((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
+                )
+            else:
+                seq.headwise_mask_layer_transpose[:, :, -1] += seq.next_mask
+            # for layer_id in range(Sequence.num_layers):
+            #     list_ref = seq.headwise_mask_layer_transpose[layer_id]
+            #     if seq.next_mask == 0b00000001:
+            #         for list_i in list_ref:
+            #             list_i.append(seq.next_mask)
+            #     else:
+            #         for list_i in list_ref:   
+            #             list_i[-1] = list_i[-1] + seq.next_mask
 
             seq.next_mask = torch_rotl_uint8(seq.next_mask, 1)
             # print(seq.next_mask)
@@ -101,12 +107,11 @@ class BlockManager(BaseService):
         self._allocate_block(block_id)
         seq.block_table.append(block_id)
         seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
-        for layer_id in range(Sequence.num_layers):
-            list_ref = seq.headwise_mask_layer_transpose[layer_id]
-            if seq.next_mask == 0b00000001:
-                for list_i in list_ref:
-                    list_i.append(seq.next_mask)
-            else:
-                for list_i in list_ref:
-                    list_i[-1] = list_i[-1] + seq.next_mask
+        # there must be at least one token after prefilling (allocate)
+        if seq.next_mask == 0b00000001:
+            seq.headwise_mask_layer_transpose = torch.cat(
+                [seq.headwise_mask_layer_transpose, torch.ones((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
+            )
+        else:
+            seq.headwise_mask_layer_transpose[:, :, -1] += seq.next_mask
         seq.next_mask = torch_rotl_uint8(seq.next_mask, 1)

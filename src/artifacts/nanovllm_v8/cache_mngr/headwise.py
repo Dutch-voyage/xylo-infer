@@ -370,12 +370,19 @@ class CacheManager(BaseService):
         return blocks
 
     def update_masks_optimized(self, seqs):
-        for layer_id in range(self.num_layers):
-            
-            self.mask_arr[layer_id] = [torch.tensor(seq.headwise_mask_layer_transpose[layer_id], device="cuda", dtype=torch.uint8) for seq in seqs]
+        # for layer_id in range(self.num_layers):
+
+        #     # this is the bottleneck
+        #     self.mask_arr[layer_id] = [torch.tensor(seq.headwise_mask_layer_transpose[layer_id], device="cuda", dtype=torch.uint8) for seq in seqs]
                                                 
-            self.cu_packed_custom_mask[layer_id] = torch.cat([m.contiguous().view(-1) for m in self.mask_arr[layer_id]], dim=0)
-            
+        #     self.cu_packed_custom_mask[layer_id] = torch.cat([m.contiguous().view(-1) for m in self.mask_arr[layer_id]], dim=0)
+
+        self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.view(self.num_layers, -1).to(device="cuda", dtype=torch.uint8) for seq in seqs], dim=-1)
+        
+        context = get_context()
+        context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
+        set_context_replace(context)
+        
     def allocate_decode_page_indices(self, seqs: list[Sequence]):
         # sglang says when using overlap mode, should not in-place operation, need to investigate, here is non-overlap mode 
         self.cu_seqs = seqs
@@ -431,11 +438,6 @@ class CacheManager(BaseService):
         # self.update_masks(seqs)
         self.update_masks_optimized(seqs)
 
-        context = get_context()
-        context.packed_headwise_mask = self.cu_packed_custom_mask
-        context.mask_indptr = self.mask_indptr
-        set_context_replace(context)
-
     def allocate_page_indices_cudagraph(self, seqs: list[Sequence]):
         context = get_context()
         if context.is_prefill:
@@ -468,16 +470,12 @@ class CacheManager(BaseService):
             [1] * (len(seqs) * self.num_kv_heads), device="cuda", dtype=torch.int32
         )
 
-        self.cu_qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32)# .to(torch.int32)
-
-        for layer_id in range(self.num_layers):
-            
-            self.mask_arr[layer_id] = [torch.tensor(seq.headwise_mask_layer_transpose[layer_id], device="cuda", dtype=torch.uint8) for seq in seqs]
-                                                
-            self.cu_packed_custom_mask[layer_id] = torch.cat([m.contiguous().view(-1) for m in self.mask_arr[layer_id]], dim=0)
+        self.cu_qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32) # .to(torch.int32)
         
+        self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.view(self.num_layers, -1).to(device="cuda", dtype=torch.uint8) for seq in seqs], dim=-1)
+
         context = get_context()
-        context.packed_headwise_mask = self.cu_packed_custom_mask
+        context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
         set_context_replace(context)
         
         self.log_occupied_pages(self.cu_kv_page_indices.shape[0])
@@ -503,7 +501,7 @@ class CacheManager(BaseService):
             self.cu_qo_indptr, 
             self.cu_kv_indptr, 
             self.cu_kv_page_indices,
-            self.cu_packed_custom_mask[0]
+            self.cu_packed_custom_mask_optimized[0]
         )
 
     def update_indices_replay(self, bs: int):
@@ -512,7 +510,7 @@ class CacheManager(BaseService):
             self.cu_qo_indptr, 
             self.cu_kv_indptr, 
             self.cu_kv_page_indices,
-            self.cu_packed_custom_mask[0]
+            self.cu_packed_custom_mask_optimized[0]
         )
     
     def read_and_store_cache_iterative(self, q_cache, k_cache, v_cache, layer_id):
@@ -619,7 +617,7 @@ class CacheManager(BaseService):
         updated_k_list = []
         updated_v_list = []
         
-        for i in range(len(self.cu_seqs)):
+        for i, seq in enumerate(self.cu_seqs):
             query_i = query[i: i + 1, :, :, :]
             key_i = key[seq_lens_cumsum[i]: seq_lens_cumsum[i + 1], :, :].unsqueeze(0)
             value_i = value[ seq_lens_cumsum[i]: seq_lens_cumsum[i + 1], :, :].unsqueeze(0)
@@ -635,14 +633,8 @@ class CacheManager(BaseService):
             updated_v = ret["value_states"]
             
             if "packed_selected_mask" in ret:
-                self.mask_arr[layer_id][i] = self.mask_arr[layer_id][i].clone() & ret["packed_selected_mask"]
-                
-                self.cu_seqs[i].headwise_mask_layer_transpose[layer_id] = [list(item.unbind(0)) for item in list(self.mask_arr[layer_id][i].to("cpu").unbind(0))]
-                # print(ret["packed_selected_mask"])
-                # headwise_mask_i = transpose_uint8_bits(self.mask_arr[layer_id][i].transpose(0, 1).reshape(-1), original_length=len(self.cu_seqs[i].headwise_mask_layer[layer_id]))          
-                # # print(headwise_mask_i)
-                # self.cu_seqs[i].headwise_mask_layer[layer_id] = headwise_mask_i.unsqueeze(-1).tolist()
-                            
+                seq.headwise_mask_layer_transpose[layer_id] = (seq.headwise_mask_layer_transpose[layer_id].clone().to("cuda") & ret["packed_selected_mask"])
+
             updated_k_list.append(updated_k.transpose(1, 2).squeeze(0).contiguous())
             updated_v_list.append(updated_v.transpose(1, 2).squeeze(0).contiguous())
         
