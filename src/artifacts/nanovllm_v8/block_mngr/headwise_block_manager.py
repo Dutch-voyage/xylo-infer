@@ -25,6 +25,7 @@ class Block:
 
 
 class BlockManager(BaseService):
+    num_kv_heads = 8
     @property
     def name(self):
         return "BlockManager"

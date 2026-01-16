@@ -179,7 +179,7 @@ class CacheManager(BaseService):
 
         self.cu_seq_pool_id = 0 
         
-        self.seq_to_pool_id = {}
+        self.seq_to_pool_id = {} 
 
         self.seq_to_slot_pool = torch.zeros((config.max_num_seqs * self.num_kv_heads, config.max_model_len * self.num_kv_heads), dtype=torch.int32, device="cuda")
         
@@ -287,6 +287,9 @@ class CacheManager(BaseService):
             self.cu_kv_page_indices,
             self.seq_to_slot_pool.shape[1],
         )
+        
+        print(self.cu_kv_page_indices)
+        print("-" * 100)
         
         # self.update_masks(seqs)
         self.update_masks_optimized(seqs)

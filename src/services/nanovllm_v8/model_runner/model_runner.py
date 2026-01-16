@@ -121,7 +121,6 @@ class ModelRunner(BaseService):
         self.cache_mngr._register_method("allocate_page_indices", self)
         self.cache_mngr._register_method("allocate_page_indices_cudagraph", self)
         self.cache_mngr._register_method("read_and_store_cache", self)
-        self.cache_mngr._register_method("read_and_store_cache_iterative", self)
         self.cache_mngr._register_method("update_indices", self)
         self.cache_mngr._register_method("update_indices_capture", self)
         self.cache_mngr._register_method("update_indices_replay", self)
