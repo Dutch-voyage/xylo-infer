@@ -68,23 +68,12 @@ class BlockManager(BaseService):
             block = self._allocate_block(block_id)
             block.update(token_ids)
             seq.block_table.append(block_id)
-            if seq.next_mask == 0b00000001 and i != 0:
+            if i % 8 == 0 and i != 0:
                 seq.headwise_mask_layer_transpose = torch.cat(
-                    [seq.headwise_mask_layer_transpose, torch.ones((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
+                    [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
                 )
-            else:
-                seq.headwise_mask_layer_transpose[:, :, -1] += seq.next_mask
-            # for layer_id in range(Sequence.num_layers):
-            #     list_ref = seq.headwise_mask_layer_transpose[layer_id]
-            #     if seq.next_mask == 0b00000001:
-            #         for list_i in list_ref:
-            #             list_i.append(seq.next_mask)
-            #     else:
-            #         for list_i in list_ref:   
-            #             list_i[-1] = list_i[-1] + seq.next_mask
-
+            seq.headwise_mask_layer_transpose[:, :, i // 8] += seq.next_mask
             seq.next_mask = torch_rotl_uint8(seq.next_mask, 1)
-            # print(seq.next_mask)
             
     def deallocate(self, seq: Sequence):
         for block_id in reversed(seq.block_table):
@@ -103,10 +92,13 @@ class BlockManager(BaseService):
         self._allocate_block(block_id)
         seq.block_table.append(block_id)
         # there must be at least one token after prefilling (allocate)
-        if seq.next_mask == 0b00000001:
+        if seq.num_blocks_max_heads % 8 == 1:
             seq.headwise_mask_layer_transpose = torch.cat(
-                [seq.headwise_mask_layer_transpose, torch.ones((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
+                [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
             )
-        else:
-            seq.headwise_mask_layer_transpose[:, :, -1] += seq.next_mask
+        # print(seq.headwise_mask_layer_transpose[0])
+        seq.headwise_mask_layer_transpose[:, torch.arange(0, self.num_kv_heads), (seq.num_blocks_head - 1) // 8] += seq.next_mask
+        # print(seq.headwise_mask_layer_transpose[0])
+        # print('-' * 100)
+        # seq.headwise_mask_layer_transpose[:, :, (seq.num_blocks_max_heads - 1) // 8] += seq.next_mask
         seq.next_mask = torch_rotl_uint8(seq.next_mask, 1)

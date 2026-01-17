@@ -8,7 +8,8 @@ import torch
 from ..sampling_params import SamplingParams
 
 def torch_rotl_uint8(x: torch.Tensor, k: int) -> torch.Tensor:
-    return (x << k) | (x >> (8 - k))
+    assert x.dtype is torch.uint8
+    return ((x << k) | (x >> (8 - k))).to(torch.uint8)
 
 
 class SequenceStatus(Enum):
@@ -47,17 +48,17 @@ class Sequence:
         self.num_blocks_head: torch.Tensor = torch.zeros((self.num_kv_heads, ), device="cpu", dtype=torch.int32)
         self.num_prompt_tokens: int = 0
         self.num_cached_tokens: int = 0
-        self.next_mask = torch.tensor([0b00000001], device="cpu", dtype=torch.uint8)
+        self.next_mask = torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)
     
     @classmethod
     def for_capture(cls, block_table: list[int]):
         seq = cls()
         seq.seq_id = next(Sequence.cuda_graph_counter)
         seq.block_table = block_table
-        seq.headwise_mask_layer_transpose = torch.zeros((cls.num_layers, cls.num_kv_heads, len(block_table)), device="cpu", dtype=torch.uint8)        
+        seq.headwise_mask_layer_transpose = torch.ones((cls.num_layers, cls.num_kv_heads, len(block_table)), device="cpu", dtype=torch.uint8)        
             
         seq.num_tokens = len(block_table) * cls.block_size
-        seq.num_blocks_head = len(block_table)
+        seq.num_blocks_head = torch.ones((seq.num_kv_heads,), device="cpu", dtype=torch.int32) * len(block_table)
         return seq
     
     @classmethod
@@ -78,7 +79,8 @@ class Sequence:
         seq.num_cached_tokens = 0
         
         # seq.next_mask = torch_rotl_uint8(0b00000001, seq.num_tokens)
-        seq.next_mask = torch.tensor([0b00000001], device="cpu", dtype=torch.uint8)
+        seq.next_mask = torch.ones((cls.num_kv_heads,), device="cpu", dtype=torch.uint8)
+    
         
         seq.block_table = []
         seq.headwise_mask_layer_transpose = torch.zeros((cls.num_layers, cls.num_kv_heads, 1), device="cpu", dtype=torch.uint8)

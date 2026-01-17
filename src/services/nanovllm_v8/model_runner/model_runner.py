@@ -431,12 +431,12 @@ class ModelRunner(BaseService):
             query_window_pos,
         )
         
-        if not self.enforce_eager and stage != RunningStage.WARMUP:
-            # cuda_graph enabled
-            self.allocate_page_indices_cudagraph(seqs)
-        else:
-            self.allocate_page_indices(seqs)
-        
+        # if not self.enforce_eager and stage != RunningStage.WARMUP:
+        #     # cuda_graph enabled
+        #     self.allocate_page_indices_cudagraph(seqs)
+        # else:
+        #     self.allocate_page_indices(seqs)
+        self.allocate_page_indices(seqs)
         self.update_indices()
         return input_ids, positions
 
@@ -490,12 +490,13 @@ class ModelRunner(BaseService):
         # self.allocate_page_indices(seqs)
         self.decode_time = 0
         self.decode_time += 1
+        self.allocate_page_indices(seqs)
         if not self.enforce_eager and stage != RunningStage.WARMUP:
             # cuda_graph enabled
-            self.allocate_page_indices_cudagraph(seqs)
+            # self.allocate_page_indices_cudagraph(seqs)
             self.update_indices_replay(bs=len(seqs))
         else:
-            self.allocate_page_indices(seqs)
+            
             self.update_indices()
         return input_ids, positions
 
@@ -562,20 +563,27 @@ class ModelRunner(BaseService):
         seqs = [Sequence.for_capture([0]) for _ in range(max_bs)]
         
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = list(range(1, 32))
-        # self.graph_bs = [2]
+        # self.graph_bs = list(range(1, 32))
+        self.graph_bs = [1]
         self.graphs = {}
         self.graph_pool = None
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
             set_context(
-                False,
+                True,
                 slot_mapping=slot_mapping[:bs],
                 context_lens=context_lens[:bs],
                 query_slot_mapping=query_slot_mapping[:bs],
             )
             # self.init_forward_metadata_capture_cuda_graph(bs, seq_lens[:bs], cu_page_indices)
+            self.allocate_page_indices(seqs[:bs])
+            set_context(
+                False,
+                slot_mapping=slot_mapping[:bs],
+                context_lens=context_lens[:bs],
+                query_slot_mapping=query_slot_mapping[:bs],
+            )
             self.allocate_page_indices(seqs[:bs])
             self.update_indices_capture(bs)
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
