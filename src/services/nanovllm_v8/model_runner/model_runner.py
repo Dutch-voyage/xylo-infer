@@ -259,6 +259,7 @@ class ModelRunner(BaseService):
                 self.read_and_store_cache(
                     module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 )
+        self.cache_mngr.organize()
         
         if self.config.if_fake_compress:
             return  
@@ -387,13 +388,14 @@ class ModelRunner(BaseService):
 
             if not seq.block_table:
                 continue
-            for i in range(seq.num_cached_blocks, seq.num_blocks):
+            for i in range(seq.num_cached_blocks, seq.num_blocks_max_heads):
                 start = seq.block_table[i] * self.block_size
-                if i != seq.num_blocks - 1:
+                if i != seq.num_blocks_max_heads - 1:
                     end = start + self.block_size
                 else:
                     end = start + seq.last_block_num_tokens
                 slot_mapping.extend(list(range(start, end)))
+                
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
             non_blocking=True
         )

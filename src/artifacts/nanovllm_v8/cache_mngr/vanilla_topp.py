@@ -92,18 +92,19 @@ class VanillaToppKV:
                         
             selected_mask = torch.zeros_like(attn_cache, dtype=torch.bool).squeeze(0) # bsz = 1 in the current implementation
             
-            selected_mask[:] = True
+            # selected_mask[:] = True
             
             selected_mask[..., :self.sink_size] = True
             
             selected_mask[..., -self.window_size:] = True
             
-            
             scatter_with_mask(torch.ones_like(selected_indices, dtype=torch.bool), selected_indices, selected_mask)
             
             mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * kv_cache_len
-            
+                        
             packed_selected_mask, mask_indptr_new = segment_packbits(selected_mask.view(-1), mask_indptr, bitorder="little")
+            
+            # print(selected_indices[0])
             
             packed_selected_mask = packed_selected_mask.view(8, -1)
             

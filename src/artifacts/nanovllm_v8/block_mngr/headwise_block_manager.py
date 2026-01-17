@@ -36,41 +36,38 @@ class BlockManager(BaseService):
         self.num_kv_heads = num_kv_heads
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.free_block_ids: deque[int] = deque(range(num_blocks))
-        self.used_block_ids: set[int] = set()
+        # during the engine running, some block will be released head by head, when all heads are released, the block can be reused
+        self.released_block_ids: torch.Tensor = torch.zeros((num_blocks,), dtype=torch.uint8, device="cpu")
     
     def _allocate_block(self, block_id: int) -> Block:
         block = self.blocks[block_id]
         block.reset()
         self.free_block_ids.remove(block_id)
-        self.used_block_ids.add(block_id)
         return self.blocks[block_id]
 
     def _deallocate_block(self, block_id: int) -> Block:
-        self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
+        self.released_block_ids[block_id] = 0
         
     def update_blocks_post_compression(self, seq: Sequence):
-        for block_id in reversed(seq.block_table[seq.num_blocks:]):
+        for block_id in reversed(seq.block_table[seq.num_blocks_max_heads:]):
             self._deallocate_block(block_id)
-        seq.block_table = seq.block_table[:seq.num_blocks]  
-        seq.head_extend_block_table = seq.head_extend_block_table[:seq.num_blocks]
+        seq.block_table = seq.block_table[:seq.num_blocks_max_heads]  
         
         # NOTE need further design
         
-        seq.headwise_mask_layer_transpose = seq.headwise_mask_layer_transpose[..., :(seq.num_blocks + 7) // 8]
-
+        seq.headwise_mask_layer_transpose = seq.headwise_mask_layer_transpose[..., :(seq.num_blocks_max_heads + 7) // 8]
     def can_allocate(self, seq: Sequence) -> bool:
-        return len(self.free_block_ids) >= seq.num_blocks
+        return len(self.free_block_ids) >= seq.num_blocks_max_heads
 
     def allocate(self, seq: Sequence):
         assert not seq.block_table
-        for i in range(seq.num_blocks):
+        for i in range(seq.num_blocks_max_heads):
             token_ids = seq.block(i)
             block_id = self.free_block_ids[0]
             block = self._allocate_block(block_id)
             block.update(token_ids)
             seq.block_table.append(block_id)
-            seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
             if seq.next_mask == 0b00000001 and i != 0:
                 seq.headwise_mask_layer_transpose = torch.cat(
                     [seq.headwise_mask_layer_transpose, torch.ones((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
@@ -93,7 +90,6 @@ class BlockManager(BaseService):
         for block_id in reversed(seq.block_table):
             self._deallocate_block(block_id)
         seq.block_table.clear()
-        seq.head_extend_block_table.clear()
 
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
@@ -103,10 +99,9 @@ class BlockManager(BaseService):
         # NOTE when the block == 1, the handling logic is different 
         assert self.block_size == 1
         block_id = self.free_block_ids[0]
-        seq.num_blocks += 1
+        seq.num_blocks_head += 1
         self._allocate_block(block_id)
         seq.block_table.append(block_id)
-        seq.head_extend_block_table.append([block_id * self.num_kv_heads + i for i in range(self.num_kv_heads)])
         # there must be at least one token after prefilling (allocate)
         if seq.next_mask == 0b00000001:
             seq.headwise_mask_layer_transpose = torch.cat(

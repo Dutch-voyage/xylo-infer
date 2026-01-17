@@ -297,41 +297,24 @@ class Attention(nn.Module, Artifact):
             q_data_type=torch.bfloat16,
         )
             
-    def prepare_metadata_for_attn_decode(self, seqs: list[Sequence]):
-        """See https://docs.flashinfer.ai/tutorials/kv_layout.html#page-table-layout for metadata required for flashinfer kernel"""
-        headwise_seq_table = list(itertools.chain(*[seq.get_headwise_block_table() for seq in seqs]))
-        
-        context = get_context()
-        
-        kv_indptr = torch.cumsum(
-            torch.tensor([0] + [len(table) for table in headwise_seq_table], device="cuda"),
-            dim=0, dtype=torch.int32
-        )
-        
-        kv_page_indices = torch.tensor(
-            list(itertools.chain(*headwise_seq_table)), device="cuda", dtype=torch.int32
-        )
-        
-        kv_last_page_lens = torch.tensor(
-            [1] * (len(seqs) * self.num_kv_heads), device="cuda", dtype=torch.int32
-        )
-
-        qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32) # .to(torch.int32)
-        
-        # mask_arr = [torch.tensor(seq.headwise_mask, device="cuda", dtype=torch.uint8).transpose(0, 1).contiguous().view(-1) for seq in seqs]
-        
-        # packed_custom_mask = torch.cat(mask_arr, dim=0).contiguous().view(-1)
-        packed_custom_mask = context.packed_headwise_mask[0]
+    def prepare_metadata_for_attn_decode(self, 
+                                         qo_indptr, 
+                                         kv_indptr, 
+                                         kv_page_indices, 
+                                         cu_packed_custom_mask
+                                         ):
+        # context = get_context()
+        # packed_custom_mask = context.packed_headwise_mask[0]
 
         self.decode_prefill_wrapper.plan(
             qo_indptr=qo_indptr, 
             paged_kv_indptr=kv_indptr,
             paged_kv_indices=kv_page_indices,
-            paged_kv_last_page_len=kv_last_page_lens,
+            paged_kv_last_page_len=self.kv_last_page_len[:qo_indptr.shape[0] -1],
             num_qo_heads=self.num_heads // self.num_kv_heads,
             num_kv_heads=1,
             head_dim_qk=self.head_dim,
-            packed_custom_mask=packed_custom_mask, 
+            packed_custom_mask=cu_packed_custom_mask,
             page_size=self.block_size,
             q_data_type=torch.bfloat16,
         )

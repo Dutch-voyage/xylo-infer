@@ -40,7 +40,6 @@ class Sequence:
     
     def __init__(self):
         self.block_table: list[int] = []
-        self.head_extend_block_table: list[int] = [] 
         self.headwise_mask_layer_transpose: torch.Tensor = torch.zeros((self.num_layers, self.num_kv_heads, 1), device="cpu", dtype=torch.uint8)
         self.query_block_id: int = -1
         self.num_tokens: int = 0
@@ -55,7 +54,6 @@ class Sequence:
         seq = cls()
         seq.seq_id = next(Sequence.cuda_graph_counter)
         seq.block_table = block_table
-        seq.head_extend_block_table = [[block_id * cls.num_kv_heads + i for i in range(cls.num_kv_heads)] for block_id in block_table]
         seq.headwise_mask_layer_transpose = torch.zeros((cls.num_layers, cls.num_kv_heads, len(block_table)), device="cpu", dtype=torch.uint8)        
             
         seq.num_tokens = len(block_table) * cls.block_size
@@ -75,7 +73,7 @@ class Sequence:
         seq.num_tokens = len(seq.token_ids)
         # seq.num_blocks = (seq.num_tokens + seq.block_size - 1) // seq.block_size
         # NOTE the block size is always 1 here 
-        seq.num_blocks_head = seq.num_tokens
+        seq.num_blocks_head = torch.ones((seq.num_kv_heads,), device="cpu", dtype=torch.int32) * seq.num_tokens
         seq.num_prompt_tokens = len(token_ids)
         seq.num_cached_tokens = 0
         
@@ -83,7 +81,6 @@ class Sequence:
         seq.next_mask = torch.tensor([0b00000001], device="cpu", dtype=torch.uint8)
         
         seq.block_table = []
-        seq.head_extend_block_table = []
         seq.headwise_mask_layer_transpose = torch.zeros((cls.num_layers, cls.num_kv_heads, 1), device="cpu", dtype=torch.uint8)
         seq.temperature = sampling_params.temperature
         seq.top_k = sampling_params.top_k
@@ -107,7 +104,6 @@ class Sequence:
         self.num_cached_tokens = 0
         
         self.block_table = copy(seq.block_table)
-        self.head_extend_block_table = copy(seq.head_extend_block_table)
         self.temperature = seq.temperature
         self.top_k = seq.top_k
         self.top_p = seq.top_p
@@ -121,8 +117,9 @@ class Sequence:
     def __getitem__(self, key):
         return self.token_ids[key]
 
-    def get_headwise_block_table(self):
-        return zip(*self.head_extend_block_table)
+    @property
+    def num_blocks_max_heads(self):
+        return int(torch.max(self.num_blocks_head).item())
 
     @property
     def query_window_num_tokens(self):
