@@ -107,23 +107,25 @@ class VanillaToppKV:
             # else:
             attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=self.p_attn)
             
-            selected_indices = torch.vmap(partial(torch.nonzero_static, size=attn_cache.shape[-1]), in_dims=(0,))(attn_topp_normed).squeeze(-1)# .reshape(num_heads, q_cache_len, -1)
+            unselected_mask = (attn_topp_normed == torch.zeros_like(attn_topp_normed))
+            # selected_mask = torch.zeros_like(selected_indices, dtype=torch.bool).squeeze(0) # bsz = 1 in the current implementation
+                    
+            # selected_mask[..., :self.sink_size] = True
             
-            selected_mask = torch.zeros_like(selected_indices, dtype=torch.bool).squeeze(0) # bsz = 1 in the current implementation
+            # selected_mask[..., -self.window_size:] = True
             
-            selected_mask[..., :self.sink_size] = True
+            # scatter_with_mask(torch.ones_like(selected_indices, dtype=torch.bool), selected_indices, selected_mask)
             
-            selected_mask[..., -self.window_size:] = True
-            
-            scatter_with_mask(torch.ones_like(selected_indices, dtype=torch.bool), selected_indices, selected_mask)
-            
-            selected_mask = selected_mask.reshape(num_kv_heads, q_cache_len, -1)
+            unselected_mask = unselected_mask.reshape(num_kv_heads, q_cache_len, -1)
                         
-            selected_mask = ~(torch.prod((~selected_mask).to(torch.int32), dim=-2).to(torch.bool))
+            selected_mask = ~(torch.prod(unselected_mask.to(torch.int32), dim=-2).to(torch.bool))
             
             # save the top budget indices
             indices_desc_topk = attn_cache.mean(-2).squeeze(0).topk(self.budget - self.window_size, dim=-1).indices
             selected_mask.scatter_(-1, indices_desc_topk, True)
+            
+            selected_mask[..., :self.sink_size] = True
+            selected_mask[..., -self.window_size:] = True
             
             mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * kv_cache_len
                         
