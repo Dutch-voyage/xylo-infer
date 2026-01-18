@@ -31,7 +31,7 @@ from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised import SnapKV
 from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_v2 import RKV
 # from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised import RKV
 
-from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp import VanillaToppKV
+from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp_revised import VanillaToppKV
 
 from src.artifacts.nanovllm_v8.cache_mngr.oMerging import OrthMerging
 from src.artifacts.nanovllm_v8.cache_mngr.oMerging_filter import OrthMerging as OrthMergingFilter
@@ -151,6 +151,19 @@ class ModelRunner(BaseService):
                 self.shm = SharedMemory(name="nanovllm")
                 self.loop()
     
+    def save_num_blocks(self):
+        os.makedirs(self.config.log_path, exist_ok=True)
+        global_log = get_log()
+        if 1 - self.p_attn >= 0.01:
+            p_attn_string = f"{int(self.p_attn * 100)}"
+        else:
+            p_attn_string = f"{int(self.p_attn * 1000)}"
+        
+        num_blocks_head = getattr(global_log, "num_blocks_head", None)
+        if num_blocks_head is not None:
+            save_path = os.path.join(self.config.log_path, f"{self.config.attn_reduce_method}_num_blocks_head_p{p_attn_string}_budget_{self.config.layer_budget}_steps_{self.config.steps_between_cache_compressions}.pt")
+            torch.save(num_blocks_head, save_path)
+    
     def save_num_topp(self):
         os.makedirs(self.config.log_path, exist_ok=True)
         global_log = get_log()
@@ -263,8 +276,9 @@ class ModelRunner(BaseService):
         
         if self.config.if_fake_compress:
             return  
-        for seq in self.cu_seqs:
-            self.update_blocks_post_compression(seq, self.config.layer_budget)
+        # NOTE think about how to revise block table
+        # for seq in self.cu_seqs:
+        #     self.update_blocks_post_compression(seq, self.config.layer_budget)
 
     def save_compress_distribution(self, steps):
         save_path = os.path.join(self.config.log_path, f"compress_distribution_{steps}.pt")
@@ -563,8 +577,8 @@ class ModelRunner(BaseService):
         seqs = [Sequence.for_capture([0]) for _ in range(max_bs)]
         
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        # self.graph_bs = list(range(1, 32))
-        self.graph_bs = [1]
+        self.graph_bs = list(range(1, 32))
+        # self.graph_bs = [1]
         self.graphs = {}
         self.graph_pool = None
 

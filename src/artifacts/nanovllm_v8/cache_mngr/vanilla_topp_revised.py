@@ -106,12 +106,10 @@ class VanillaToppKV:
             #     )
             # else:
             attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=self.p_attn)
-
-            selected_indices = torch.vmap(partial(torch.nonzero_static, size=attn_cache.shape[-1]), in_dims=(0,))(attn_topp_normed).squeeze(-1)
             
-            selected_mask = torch.zeros_like(attn_cache, dtype=torch.bool).squeeze(0) # bsz = 1 in the current implementation
+            selected_indices = torch.vmap(partial(torch.nonzero_static, size=attn_cache.shape[-1]), in_dims=(0,))(attn_topp_normed).squeeze(-1)# .reshape(num_heads, q_cache_len, -1)
             
-            # selected_mask[:] = True
+            selected_mask = torch.zeros_like(selected_indices, dtype=torch.bool).squeeze(0) # bsz = 1 in the current implementation
             
             selected_mask[..., :self.sink_size] = True
             
@@ -119,11 +117,17 @@ class VanillaToppKV:
             
             scatter_with_mask(torch.ones_like(selected_indices, dtype=torch.bool), selected_indices, selected_mask)
             
+            selected_mask = selected_mask.reshape(num_kv_heads, q_cache_len, -1)
+                        
+            selected_mask = ~(torch.prod((~selected_mask).to(torch.int32), dim=-2).to(torch.bool))
+            
+            # save the top budget indices
+            indices_desc_topk = attn_cache.mean(-2).squeeze(0).topk(self.budget - self.window_size, dim=-1).indices
+            selected_mask.scatter_(-1, indices_desc_topk, True)
+            
             mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * kv_cache_len
                         
             packed_selected_mask, mask_indptr_new = segment_packbits(selected_mask.view(-1), mask_indptr, bitorder="little")
-            
-            # print(selected_indices[0])
             
             packed_selected_mask = packed_selected_mask.view(8, -1)
             
@@ -188,7 +192,7 @@ def scatter_with_mask(src: torch.Tensor, indices: torch.Tensor, output_tensor: t
     B, N = src.shape
     
     # Grid configuration
-    BLOCK_SIZE = 1024
+    BLOCK_SIZE = 512
     grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']), B)
 
     scatter_with_mask_kernel[grid](

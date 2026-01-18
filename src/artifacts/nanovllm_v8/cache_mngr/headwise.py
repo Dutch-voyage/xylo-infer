@@ -13,7 +13,7 @@ import torch
 import itertools
 
 from src.services.nanovllm_v8.utils.context import get_context, set_context_replace
-from src.services.nanovllm_v8.utils.logging import get_log, set_log
+from src.services.nanovllm_v8.utils.logging import get_log, set_log, append_item_to_log
 # all implemntation here
 
 import triton
@@ -239,22 +239,25 @@ def gather_req_to_token_pool_headwise(
     src_indices, 
     seq_lens, 
     seq_lens_cumsum, 
-):
-    batch_size = seq_pool_indices.shape[0]
-    max_len = seq_lens.max().item()
-    
+):  
+    seq_lens_cumsum = seq_lens_cumsum.to(torch.int32)
+    seq_lens = seq_lens.to(torch.int32)
+    for i in range(seq_lens.shape[0]):
+        src_index = src_indices[seq_lens_cumsum[i]: seq_lens_cumsum[i] + seq_lens[i]]
+        dst_index = torch.arange(0, seq_lens[i], device="cuda")
+        seq_to_token_pool[seq_pool_indices[i], dst_index] = seq_to_token_pool[seq_pool_indices[i], src_index]
     # Using a Block Size of 32
-    BLOCK_SIZE = 32
+    # BLOCK_SIZE = 32s
     
-    gather_req_to_token_pool_triton_headwise[grid(batch_size, max_len, BLOCK_SIZE)](
-        seq_to_token_pool,
-        seq_pool_indices,
-        src_indices, 
-        seq_lens, 
-        seq_lens_cumsum.to(torch.int32),
-        seq_to_token_pool.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE, 
-    )
+    # gather_req_to_token_pool_triton_headwise[grid(batch_size, max_len, BLOCK_SIZE)](
+    #     seq_to_token_pool,
+    #     seq_pool_indices,
+    #     src_indices, 
+    #     seq_lens, 
+    #     seq_lens_cumsum.to(torch.int32),
+    #     seq_to_token_pool.stride(0),
+    #     BLOCK_SIZE=BLOCK_SIZE, 
+    # )
 
 def uint8_to_bits(tensor):
     """
@@ -410,25 +413,42 @@ class CacheManager(BaseService):
         self.cu_packed_custom_mask = {layer_id: None for layer_id in range(self.num_layers)}
     
     def _organize(self, seq: Sequence):
-        # src_seq_pool_indices: [(seq_pool_id, block_id)]
-        # num_blocks_head: [[num_blocks_per_head] * len(seq_pool_indices)]
-        
         cu_seq_pool_indices = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
         
         cu_seq_pool = self.seq_to_slot_pool[cu_seq_pool_indices, :seq.num_blocks_max_heads]   
-
-        # print(torch.prod(1 - uint8_to_bits(seq.headwise_mask_layer_transpose)[..., :seq.num_blocks_max_heads], dim=0))
         
-        pruned_indices = torch.nonzero(torch.prod(1 - uint8_to_bits(seq.headwise_mask_layer_transpose)[..., :seq.num_blocks_max_heads], dim=0), as_tuple=True)
+        prod_pruned_mask = torch.prod(1 - uint8_to_bits(seq.headwise_mask_layer_transpose)[..., :seq.num_blocks_max_heads], dim=0)
         
-        # print(torch.prod((1 - uint8_to_bits(seq.headwise_mask_layer_transpose))[:seq.num_blocks_max_heads], dim=0))
+        for head_id in range(self.num_kv_heads):
+            prod_pruned_mask[head_id, seq.num_blocks_head[head_id]:] = 0
+        
+        pruned_indices = torch.nonzero(prod_pruned_mask, as_tuple=True)
         
         pruned_indices_token = cu_seq_pool[pruned_indices] 
         
+        if pruned_indices_token.numel() == 0:
+            return
+        
+        # seq.block_id_to_count[(pruned_indices_token // 8).tolist()] += 1
+        
+        # for block_id in (pruned_indices_token // 8).unique().tolist():
+        #     count = seq.block_id_to_count[block_id.item()]
+        #     if count == self.num_kv_heads:
+        #         self._deallocate_block(block_id)
+        #         seq.block_table.remove(block_id)
+        #         seq.block_id_to_count.pop(block_id)
+        
         kept_mask = torch.isin(cu_seq_pool, pruned_indices_token, invert=True)
+        
+        for head_id in range(self.num_kv_heads):
+            kept_mask[head_id, seq.num_blocks_head[head_id]:] = 0
+        
         kept_indices = torch.nonzero(kept_mask).squeeze().to("cpu")
 
-        # before the organize, the num_blocks_head_max_heads is full length            
+        # print(torch.nonzero(~ kept_mask).squeeze().to("cpu"))
+        
+        # print(kept_indices)
+        
         cu_kept_indices = kept_indices[:,0]
         
         cu_num_blocks_shifted_left = torch.cat([torch.zeros((1,), device="cpu", dtype=torch.int32), cu_kept_indices], dim=0)
@@ -438,16 +458,13 @@ class CacheManager(BaseService):
         cu_num_blocks_diffs = cu_num_blocks_shifted_left - cu_num_blocks_shifted_right
         
         cu_num_block_head_cumsum = torch.nonzero(cu_num_blocks_diffs).squeeze(-1)
-                
-        cu_num_block_head = cu_num_block_head_cumsum - torch.cat([torch.zeros((1,), device="cpu", dtype=torch.int32), cu_num_block_head_cumsum[:-1]], dim=0)
         
-        # print(seq.num_blocks_head)
-        # print(self.seq_to_slot_pool[7][:seq.num_blocks_head[7]])
+        cu_num_block_head = cu_num_block_head_cumsum - torch.cat([torch.zeros((1,), device="cpu", dtype=torch.int32), cu_num_block_head_cumsum[:-1]], dim=0)
+
+        append_item_to_log("num_blocks_head", seq.num_blocks_head.int().detach().cpu())
         
         seq.num_blocks_head = cu_num_block_head
-        
-        # print(seq.num_blocks_head)
-        
+                
         gather_req_to_token_pool_headwise(
             self.seq_to_slot_pool, 
             self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices, 
@@ -455,22 +472,20 @@ class CacheManager(BaseService):
             cu_num_block_head.to("cuda"), 
             torch.cat([torch.zeros(1), cu_num_block_head_cumsum[:-1]]).to("cuda")
         )
-        
-        # print(self.seq_to_slot_pool[7][:cu_num_block_head[7]])
-        # print("-" * 100)
-        
+
         cu_headwise_mask_layer_transpose = generate_packed_mask(seq.num_blocks_head)[None, ...].repeat(self.num_layers, 1, 1).to("cpu")
         seq.headwise_mask_layer_transpose = cu_headwise_mask_layer_transpose
         
         seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_head % 8)
-        # seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_max_heads % 8)
 
         seq.next_mask = seq.next_mask.to(torch.uint8)        
-        # gather non-zero headwise indices to the front 
 
     def organize(self):
         for seq in self.cu_seqs:
+            # print("\n"+ "-" * 100)
+            # print(f"[Debug] before organize seq_id={seq.seq_id} effective seq len={seq.num_blocks_head}")
             self._organize(seq)
+            # print(f"[Debug] after organize seq_id={seq.seq_id} effective seq len={seq.num_blocks_head}")
     
     def allocate_prefill_page_indices(self, seqs: list[Sequence]):
         self.cu_seqs = seqs
@@ -573,21 +588,20 @@ class CacheManager(BaseService):
         self.cu_seqs = seqs
         self.len_seqs = len(seqs)
             
-        self.seq_lens = torch.cat(
-            [seq.num_blocks_head.unsqueeze(0) for seq in self.cu_seqs], #  * self.num_kv_heads, 
-            dim=0
+        self.seq_lens = torch.tensor(
+            [seq.num_blocks_max_heads for seq in self.cu_seqs], #  * self.num_kv_heads, 
         ).to(torch.int32).to("cuda")
         context = get_context()
+        cu_slot_mapping = context.slot_mapping
         
         if context.is_prefill:
-            for seq_id in seqs:
-                self.seq_to_pool_id[seq_id.seq_id] = self.cu_seq_pool_id
-                self.cu_seq_pool_id += 1
-                self.cu_seq_pool_id %= self.max_num_seqs
+            for seq in seqs:
+                if seq.seq_id not in self.seq_to_pool_id:
+                    self.seq_to_pool_id[seq.seq_id] = self.cu_seq_pool_id
+                    self.cu_seq_pool_id += 1
+                    self.cu_seq_pool_id %= self.max_num_seqs
             
-            self.cu_seqs_to_slot_pool_indices = torch.tensor([self.seq_to_pool_id[seq_id.seq_id] for seq_id in seqs], device="cuda", dtype=torch.int32)
-                        
-            cu_slot_mapping = context.slot_mapping
+            self.cu_seqs_to_slot_pool_indices = torch.tensor([self.seq_to_pool_id[seq.seq_id] for seq in seqs], device="cuda", dtype=torch.int32)
 
             write_req_to_token_pool_headwise(
                 self.seq_to_slot_pool,
@@ -599,49 +613,53 @@ class CacheManager(BaseService):
                 self.seq_to_slot_pool.stride(0)
             ) 
         else:
-            cu_slot_mapping = context.slot_mapping
+            self.cu_seqs_to_slot_pool_indices = torch.tensor([self.seq_to_pool_id[seq.seq_id] for seq in seqs], device="cuda", dtype=torch.int32)
             
             cu_slot_mapping_headwise = ((cu_slot_mapping * self.num_kv_heads)[:, None] + self.head_indices[None, :])
             
             seq_to_pool_indices_headwise = (self.cu_seqs_to_slot_pool_indices[:, None] * self.num_kv_heads) + self.head_indices[None, :]
             
-            seq_lens_headwise = (self.seq_lens - 1)
-
+            seq_lens_headwise = torch.cat([seq.num_blocks_head.unsqueeze(0) for seq in seqs]) - 1
+            
+            seq_lens_headwise = torch.maximum(seq_lens_headwise, torch.zeros_like(seq_lens_headwise))
+            
             self.seq_to_slot_pool[seq_to_pool_indices_headwise, seq_lens_headwise] = cu_slot_mapping_headwise
         
-        headwise_seq_pool_id = torch.tensor([self.seq_to_pool_id[seq.seq_id] for seq in seqs], device="cuda", dtype=torch.int32)[:, None] * self.num_kv_heads + self.head_indices[None, :]
-        
-        headwise_seq_lens = torch.cat([seq.num_blocks_head for seq in seqs]).to("cuda")
-        
-        self.cu_kv_page_indices = read_req_to_token_pool_headwise(
-            self.seq_to_slot_pool,
-            headwise_seq_pool_id.reshape(-1),
-            headwise_seq_lens, 
-            len(seqs) * self.num_kv_heads,
-            self.seq_to_slot_pool.stride(0)
-        )
-        
-        self.cu_kv_indptr = torch.cumsum(
-            torch.cat([torch.tensor([0], device="cuda"), headwise_seq_lens], dim=0),
-            dim=0, dtype=torch.int32
-        )
+            headwise_seq_pool_id = torch.tensor([self.seq_to_pool_id[seq.seq_id] for seq in seqs], device="cuda", dtype=torch.int32)[:, None] * self.num_kv_heads + self.head_indices[None, :]
+            
+            headwise_seq_lens = torch.cat([seq.num_blocks_head for seq in seqs]).to("cuda")
+            
+            self.cu_kv_page_indices = read_req_to_token_pool_headwise(
+                self.seq_to_slot_pool,
+                headwise_seq_pool_id.reshape(-1),
+                headwise_seq_lens, 
+                len(seqs) * self.num_kv_heads,
+                self.seq_to_slot_pool.stride(0)
+            )
+            
+            # print(self.seq_to_slot_pool[8, :headwise_seq_lens[8]])
+            
+            self.cu_kv_indptr = torch.cumsum(
+                torch.cat([torch.tensor([0], device="cuda"), headwise_seq_lens], dim=0),
+                dim=0, dtype=torch.int32
+            )
 
-        # print(self.cu_kv_page_indices)
-        # print("-" * 100)
-        
-        self.cu_kv_last_page_lens = torch.tensor(
-            [1] * (len(seqs) * self.num_kv_heads), device="cuda", dtype=torch.int32
-        )
+            # print(self.cu_kv_page_indices)
+            # print("-" * 100)
+            
+            self.cu_kv_last_page_lens = torch.tensor(
+                [1] * (len(seqs) * self.num_kv_heads), device="cuda", dtype=torch.int32
+            )
 
-        self.cu_qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32) # .to(torch.int32)
-        
-        self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.view(self.num_layers, -1).to(device="cuda", dtype=torch.uint8) for seq in seqs], dim=-1)
-        
-        context = get_context()
-        context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
-        set_context_replace(context)
-        
-        self.log_occupied_pages(self.cu_kv_page_indices.shape[0])
+            self.cu_qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32) # .to(torch.int32)
+            
+            self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.view(self.num_layers, -1).to(device="cuda", dtype=torch.uint8) for seq in seqs], dim=-1)
+            
+            context = get_context()
+            context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
+            set_context_replace(context)
+            
+            self.log_occupied_pages(self.cu_kv_page_indices.shape[0])
 
     def log_occupied_pages(self, occupied_pages):
         log = get_log()
@@ -678,7 +696,45 @@ class CacheManager(BaseService):
             self.cu_kv_page_indices,
             self.cu_packed_custom_mask_optimized[0]
         )
+    
+    def _read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
+        for seq in self.cu_seqs:
+            slot_mappings = self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads, :seq.num_blocks_max_heads].to(torch.int32) // self.num_kv_heads # indices of the first head
             
+            query_slot_mapping = torch.tensor([seq.query_block_id], device="cuda").to(torch.int32)
+            
+            query = read_q_cache(
+                q_cache=q_cache,
+                query_slot_mapping=query_slot_mapping,
+            )
+            
+            key, value = read_kvcache(
+                k_cache=k_cache,
+                v_cache=v_cache,
+                slot_mapping=slot_mappings,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim
+            )
+            
+            key = key.unsqueeze(0)
+            value = value.unsqueeze(0)
+                        
+            ret = self.compressor.update_kv(
+                query.transpose(1, 2),
+                key.transpose(1, 2),
+                value.transpose(1, 2),
+                seq.num_blocks_head, 
+                layer_id,
+            )
+            
+            updated_k = ret["key_states"]
+            updated_v = ret["value_states"]
+            
+            if "packed_selected_mask" in ret:
+                seq.headwise_mask_layer_transpose[layer_id] = (seq.headwise_mask_layer_transpose[layer_id].clone().to("cuda") & ret["packed_selected_mask"])
+            
+        return 
+                 
     def _packed_read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
         slot_mappings_packed = torch.cat([self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id], :seq.num_blocks_max_heads] for seq in self.cu_seqs], dim=0).to(torch.int32)
         
@@ -746,4 +802,5 @@ class CacheManager(BaseService):
         )
     
     def read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
-        return self._packed_read_and_store_cache(q_cache, k_cache, v_cache, layer_id)
+        # return self._packed_read_and_store_cache(q_cache, k_cache, v_cache, layer_id)
+        return self._read_and_store_cache(q_cache, k_cache, v_cache, layer_id)

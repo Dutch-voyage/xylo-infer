@@ -49,6 +49,8 @@ class Sequence:
         self.num_prompt_tokens: int = 0
         self.num_cached_tokens: int = 0
         self.next_mask = torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)
+        self.count_to_block_id = {i: [] for i in range(self.num_kv_heads)}
+        self.block_id_to_count = {}
     
     @classmethod
     def for_capture(cls, block_table: list[int]):

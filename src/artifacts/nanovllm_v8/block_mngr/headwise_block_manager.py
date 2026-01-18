@@ -68,6 +68,7 @@ class BlockManager(BaseService):
             block = self._allocate_block(block_id)
             block.update(token_ids)
             seq.block_table.append(block_id)
+            seq.block_id_to_count[block_id] = 0
             if i % 8 == 0 and i != 0:
                 seq.headwise_mask_layer_transpose = torch.cat(
                     [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
@@ -91,6 +92,7 @@ class BlockManager(BaseService):
         seq.num_blocks_head += 1
         self._allocate_block(block_id)
         seq.block_table.append(block_id)
+        seq.block_id_to_count[block_id] = 0
         # there must be at least one token after prefilling (allocate)
         if seq.num_blocks_max_heads % 8 == 1:
             seq.headwise_mask_layer_transpose = torch.cat(

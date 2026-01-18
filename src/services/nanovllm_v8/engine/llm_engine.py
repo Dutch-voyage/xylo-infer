@@ -118,6 +118,7 @@ class LLMEngine:
             for seq_id, token_ids, logits in output:
                 outputs[seq_id] = (token_ids, logits)
             pbar.update(1)
+        self.model_runner.call("save_num_blocks")
         if self.config.if_log_compress:
             self.model_runner.call("save_lse_log")
             self.model_runner.call("save_num_topp")

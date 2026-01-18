@@ -354,7 +354,7 @@ class Attention(nn.Module, Artifact):
         # packed_custom_mask_buf = decode_wrapper._custom_mask_buf
         # packed_custom_mask_buf[: cu_packed_custom_mask.shape[0]] = cu_packed_custom_mask
         
-        decode_wrapper.begin_forward(
+        decode_wrapper.plan(
             qo_indptr=self.qo_indptr[:bs * self.num_kv_heads + 1], 
             paged_kv_indptr=self.kv_indptr[:bs * self.num_kv_heads + 1],
             paged_kv_indices=cu_page_indices,
