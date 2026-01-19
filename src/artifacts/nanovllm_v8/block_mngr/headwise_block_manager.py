@@ -49,10 +49,10 @@ class BlockManager(BaseService):
         self.free_block_ids.append(block_id)
         self.released_block_ids[block_id] = 0
         
-    def update_blocks_post_compression(self, seq: Sequence):
-        for block_id in reversed(seq.block_table[seq.num_blocks_max_heads:]):
+    def update_blocks_post_compression(self, seq: Sequence, budget: int):
+        for block_id in reversed(seq.block_table[budget:]):
             self._deallocate_block(block_id)
-        seq.block_table = seq.block_table[:seq.num_blocks_max_heads]  
+        seq.block_table = seq.block_table[:budget]  
         
         # NOTE need further design
         

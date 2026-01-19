@@ -6,6 +6,50 @@ from functools import partial
 import triton
 import triton.language as tl
 
+def gather_selected_kv(kv_cache, indicator):
+    """
+    Args:
+        kv_cache: [bsz, num_kv_heads, kv_len, head_dim]
+        indicator: [bsz, num_kv_heads, kv_len] (bool or 0/1) indicating selection
+    
+    Returns:
+        selected_kv: [bsz, num_kv_heads, max_selected_len, head_dim]
+    """
+    bsz, num_kv_heads, kv_len, head_dim = kv_cache.shape
+
+    # 1. Calculate the target length (max selections across the batch/heads)
+    #    We assume the user wants the tensor padded to the longest selection in the batch.
+    num_selected = indicator.sum(dim=-1)  # [bsz, num_kv_heads]
+    max_selected_len = num_selected.max().item()
+    
+    # Optional: If nothing is selected, return empty tensor
+    if max_selected_len == 0:
+        return torch.zeros((bsz, num_kv_heads, 0, head_dim), 
+                           device=kv_cache.device, dtype=kv_cache.dtype)
+
+    # 2. Get gather indices using Stable Sort
+    #    descending=True puts 1s (True) before 0s (False).
+    #    stable=True ensures selected tokens remain in their original relative order (time order).
+    sorted_indices = torch.argsort(indicator.int(), dim=-1, descending=True, stable=True)
+    
+    #    Truncate to the max length needed
+    gather_indices = sorted_indices[..., :max_selected_len] # [bsz, num_kv_heads, max_selected]
+
+    # 3. Gather the KV cache
+    #    We need to expand indices to match the head_dim
+    gather_indices_expanded = gather_indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+    selected_kv = torch.gather(kv_cache, 2, gather_indices_expanded)
+
+    # 4. Zero out padding (The 'gather' pulled unselected tokens into the padding slots)
+    #    Create a mask: [1, 1, max_selected] < [bsz, num_heads, 1]
+    range_vector = torch.arange(max_selected_len, device=kv_cache.device).view(1, 1, -1)
+    mask = range_vector < num_selected.unsqueeze(-1)
+    
+    #    Apply mask
+    selected_kv = selected_kv * mask.unsqueeze(-1)
+
+    return selected_kv
+
 """
 The spin lock design is adapted from Cut-Cross-Entropy
 https://github.com/apple/ml-cross-entropy/blob/b7a02791b234e187b524fb1dba6a812d521b203a/cut_cross_entropy/cce_lse_forward.py#L12
@@ -507,7 +551,7 @@ def cal_similarity(
         similarity_cos = similarity_cos.mean(dim=1)
     elif aggregation == "max":
         similarity_cos = similarity_cos.max(dim=1).values
-
+    
 
     if normalization:
         similarity_cos = similarity_cos.softmax(dim=-1)

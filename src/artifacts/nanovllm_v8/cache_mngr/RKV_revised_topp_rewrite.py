@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from src.services.nanovllm_v8.utils.logging import append_item_to_log
 
-from .utils import cal_similarity, compute_attention_scores, update_log
+from .utils import cal_similarity, compute_attention_scores, update_log, gather_selected_kv
 from .lse_preserve_merge import merge_fixed_budget, merge_multi_to_one
 from .binary_search import binary_search_T_linear, gradient_descent_T_linear
 
@@ -16,7 +16,8 @@ class RKV:
     def __init__(
         self,
         config,
-        budget=128,
+        budget=1024,
+        lower_bound=128,
         window_size=8,
         kernel_size=7,
         mix_lambda=0.07,
@@ -26,7 +27,8 @@ class RKV:
         **kwargs,
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
-        self.budget = budget
+        # self.budget = budget
+        self.budget = lower_bound
         self.sink_size = 1
         self.window_size = window_size - self.sink_size
         self.kernel_size = kernel_size
@@ -78,7 +80,7 @@ class RKV:
                     dim=-1,
                     dtype=torch.float32,
                 )
-                .mean(dim=-2)
+                # .mean(dim=-2)
                 .to(query_states.dtype)
             )
 
@@ -95,6 +97,7 @@ class RKV:
 
             similarity_cos = -cal_similarity(
                 key_states,
+                aggregation="none", 
                 normalization=True,
                 retain_ratio=self.retain_ratio,
                 retain_direction=self.retain_direction,
@@ -109,6 +112,7 @@ class RKV:
             #     shifted_probs,
             #     self.p_attn,
             # )
+            
             shifted_probs -= shifted_probs.amin(dim=-1, keepdim=True).detach()
             shifted_probs = shifted_probs / shifted_probs.sum(dim=-1, keepdim=True)
             shift_logits = torch.log(shifted_probs + 1e-10)
@@ -171,20 +175,28 @@ class RKV:
                 indices_desc_topk = attn_cache.squeeze(0).topk(k, dim=-1).indices
                 selected_mask_full.scatter_(-1, indices_desc_topk + self.sink_size, True)
                 
+                print(selected_mask_full.sum(-1))
+                
                 selected_mask_full[..., :self.sink_size] = True
                 selected_mask_full[..., -self.window_size:] = True
                 
-                mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * kv_cache_len
+                key_states = gather_selected_kv(key_states, selected_mask_full.unsqueeze(0))
+                value_states = gather_selected_kv(value_states, selected_mask_full.unsqueeze(0))
                 
-                packed_selected_mask, mask_indptr_new = segment_packbits(selected_mask_full.view(-1), mask_indptr, bitorder="little")
+                num_blocks_head = selected_mask_full.to(torch.int32).sum(-1)
+                
+                organized_selected_mask = torch.zeros_like(selected_mask_full)
+                for head_id in range(num_kv_heads):
+                    organized_selected_mask[head_id, :num_blocks_head[head_id]] = 1
+                
+                mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * kv_cache_len
+                packed_selected_mask, _ = segment_packbits(organized_selected_mask.view(-1), mask_indptr, bitorder="little")
                 
                 packed_selected_mask = packed_selected_mask.view(8, -1)
-            
-            # k_sink = key_states[:, :, : self.sink_size, :]
-            # v_sink = value_states[:, :, : self.sink_size, :]
-            # k_cur = key_states[:, :, -self.window_size :, :]
-            # v_cur = value_states[:, :, -self.window_size :, :]
-            # key_states = torch.cat([k_sink, k_compress, k_cur], dim=2)
-            # value_states = torch.cat([v_sink, v_compress, v_cur], dim=2)
-            
-            return {"key_states": key_states, "value_states": value_states, "packed_selected_mask": packed_selected_mask}
+                
+                key_states = key_states.transpose(1, 2).squeeze(0).contiguous()
+                value_states = value_states.transpose(1, 2).squeeze(0).contiguous()
+                
+                print(key_states.shape)
+                    
+            return {"key_states": key_states, "value_states": value_states, "packed_selected_mask": packed_selected_mask, "num_blocks_this_layer": num_blocks_head.max().item()}

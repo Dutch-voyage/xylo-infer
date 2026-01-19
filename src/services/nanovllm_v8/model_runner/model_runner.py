@@ -26,10 +26,10 @@ from src.artifacts.nanovllm_v8.cache_mngr.headwise import CacheManager
 # from src.artifacts.nanovllm_v8.cache_mngr.layerwise import CacheManager
 from src.artifacts.nanovllm_v8.cache_mngr.nocompress import NoCompress
 # from src.artifacts.nanovllm_v8.cache_mngr.snapKV import SnapKV
-from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised_topp import SnapKV
+from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised_topp_rewrite import SnapKV
 # from src.artifacts.nanovllm_v8.cache_mngr.RKV import RKV
 # from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_v2 import RKV
-from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_topp import RKV
+from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_topp_rewrite import RKV
 
 from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp_revised import VanillaToppKV
 
@@ -273,12 +273,6 @@ class ModelRunner(BaseService):
                     module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 )
         self.cache_mngr.organize()
-        
-        if self.config.if_fake_compress:
-            return  
-        # NOTE think about how to revise block table
-        # for seq in self.cu_seqs:
-        #     self.update_blocks_post_compression(seq, self.config.layer_budget)
 
     def save_compress_distribution(self, steps):
         save_path = os.path.join(self.config.log_path, f"compress_distribution_{steps}.pt")

@@ -67,9 +67,9 @@ def calculate_mass(shifted_logits, T, num_selected, transform_func):
     mass = reduce_num_selected(probs, num_selected)
     return mass
 
+num_groups = 4
 def calculate_mass_differentiable(shifted_logits, T, num_selected, transform_func):
     """Differentiable version of calculate_mass for gradient descent."""
-
     T = T.unsqueeze(-1).repeat(1, shifted_logits.shape[0] // T.shape[0]).reshape(-1)
     scaled_logits = shifted_logits / T.unsqueeze(-1)
     scaled_logits = transform_func(scaled_logits)
@@ -150,16 +150,20 @@ def count_topp_selected(probs, p):
     num_selected = selected_mask.sum(dim=-1)
     return num_selected
 
-def gradient_descent_T(raw_logits, anchor_p, transform_func, lr=1e-2, max_iters=10):
+num_kv_heads = 8    
+def gradient_descent_T(raw_logits, anchor_p, transform_func, lr=1e-2, max_iters=50):
     bsz, num_heads, q_cache_len, kv_cache_len = raw_logits.shape
     # bsz, num_heads, kv_cache_len = raw_logits.shape
     raw_logits = raw_logits.reshape(-1, kv_cache_len)
-    T = torch.full((bsz * num_heads,), 0.5, device="cuda", dtype=torch.float32, requires_grad=True)
+    T = torch.full((bsz, num_kv_heads), 0.5, device="cuda", dtype=torch.float32, requires_grad=True)
     optimizer = torch.optim.Adam([T], lr=lr)
     # optimizer = torch.optim.SGD([T], lr=lr, momentum=0.9, weight_decay=1e-4, nesterov=True)    
     num_selected_oracle = count_topp_selected(F.softmax(raw_logits, dim=-1), anchor_p)
-
-
+    
+    T = T.repeat(1, num_heads // num_kv_heads).reshape(-1)
+    
+    # print(num_selected_oracle.float().mean().item())
+    
     for iter in range(max_iters):
         # Use differentiable version for gradient-based optimization
         cu_mass = calculate_mass_differentiable(raw_logits, T, num_selected_oracle, transform_func)
@@ -176,11 +180,15 @@ def gradient_descent_T(raw_logits, anchor_p, transform_func, lr=1e-2, max_iters=
     # print("-" * 100)
     # print(count_topp_selected(F.softmax(raw_logits, dim=-1), anchor_p))
     
+    # print(count_topp_selected(F.softmax(transform_func(raw_logits.view(-1, kv_cache_len)), dim=-1), anchor_p).float().mean().item())
+    
+    T = T.unsqueeze(-1).repeat(1, raw_logits.shape[0] // T.shape[0]).reshape(-1)
+    
     raw_logits /= T.unsqueeze(-1)
     
-    raw_logits = raw_logits.reshape(bsz, num_heads, q_cache_len, kv_cache_len)
-    transformed_logits = transform_func(raw_logits.view(-1, kv_cache_len)).view(bsz, num_heads, q_cache_len, kv_cache_len)
-    
+    transformed_logits = transform_func(raw_logits).view(bsz, num_heads, q_cache_len, kv_cache_len)
+    # print(count_topp_selected(F.softmax(transformed_logits.view(-1, kv_cache_len), dim=-1), anchor_p).float().mean().item())
+    # print("-" * 100)
     # T = T.detach().reshape(bsz, num_heads)
     # raw_logits = raw_logits.reshape(bsz, num_heads, kv_cache_len)
     # raw_logits = raw_logits / T.unsqueeze(-1)
