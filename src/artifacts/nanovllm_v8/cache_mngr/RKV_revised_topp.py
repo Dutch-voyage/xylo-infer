@@ -38,13 +38,15 @@ class RKV:
         self.p_attn = config.p_attn
         self.if_log_compress = config.if_log_compress
         
-
+        self.temperatures = {}
+        
     def update_kv(
         self,
         query_states,
         key_states,
         value_states,
         effective_kv_head_lens=None,
+        seq_id = None, 
         *args,
     ):
         bsz, num_heads, q_cache_len, head_dim = query_states.shape
@@ -107,16 +109,21 @@ class RKV:
             #     shifted_probs,
             #     self.p_attn,
             # )
-
             shifted_probs -= shifted_probs.amin(dim=-1, keepdim=True).detach()
             shifted_probs = shifted_probs / shifted_probs.sum(dim=-1, keepdim=True)
             shift_logits = torch.log(shifted_probs + 1e-10)
-            
-            attn_cache, T = gradient_descent_T_linear(
-                attn_weights_sum,
-                shift_logits,
-                self.p_attn,
-            )
+    
+            if seq_id not in self.temperatures:            
+                attn_cache, T = gradient_descent_T_linear(
+                    attn_weights_sum,
+                    shift_logits,
+                    self.p_attn,
+                )
+                self.temperatures[seq_id] = T
+            else:
+                T = self.temperatures[seq_id]
+                attn_cache = shift_logits / T.unsqueeze(-1)
+                attn_cache = F.softmax(attn_cache, dim=-1)
 
             if self.if_log_compress:
                 update_log(
