@@ -48,6 +48,14 @@ def append_item_to_log(name, item):
         setattr(_LOG, name, [])
     getattr(_LOG, name).append(item)
 
+def append_item_to_seq_log(name, seq_id, item):
+    global _LOG
+    if getattr(_LOG, name, None) is None:
+        setattr(_LOG, name, {})
+    if getattr(_LOG, name).get(seq_id, None) is None:
+        getattr(_LOG, name)[seq_id] = []
+    getattr(_LOG, name)[seq_id].append(item)
+
 def append_lse_log(lse: torch.Tensor):
     global _LOG
     if getattr(_LOG, "lse_log", None) is None:

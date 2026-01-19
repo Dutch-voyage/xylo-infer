@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from src.services.nanovllm_v7 import LLM, SamplingParams
+from src.services.nanovllm_v8 import LLM, SamplingParams
 from transformers import AutoTokenizer
 import os
 import datasets

@@ -13,7 +13,7 @@ import torch
 import itertools
 
 from src.services.nanovllm_v8.utils.context import get_context, set_context_replace
-from src.services.nanovllm_v8.utils.logging import get_log, set_log, append_item_to_log
+from src.services.nanovllm_v8.utils.logging import get_log, set_log, append_item_to_log, append_item_to_seq_log
 # all implemntation here
 
 import triton
@@ -460,8 +460,8 @@ class CacheManager(BaseService):
         cu_num_block_head_cumsum = torch.nonzero(cu_num_blocks_diffs).squeeze(-1)
         
         cu_num_block_head = cu_num_block_head_cumsum - torch.cat([torch.zeros((1,), device="cpu", dtype=torch.int32), cu_num_block_head_cumsum[:-1]], dim=0)
-
-        append_item_to_log("num_blocks_head", seq.num_blocks_head.int().detach().cpu())
+        
+        append_item_to_seq_log("num_blocks_head", seq.seq_id, seq.num_blocks_head.int().detach().cpu())
         
         seq.num_blocks_head = cu_num_block_head
                 

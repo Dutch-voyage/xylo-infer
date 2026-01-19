@@ -15,6 +15,7 @@ class Scheduler:
 
     def __init__(self, config: Config):
         self.max_num_seqs = config.max_num_seqs if config.lazy_max_num_seqs <= 0 else config.lazy_max_num_seqs
+        self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size, config.hf_config.num_key_value_heads)
