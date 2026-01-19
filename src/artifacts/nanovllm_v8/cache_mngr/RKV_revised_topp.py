@@ -8,6 +8,9 @@ from .utils import cal_similarity, compute_attention_scores, update_log
 from .lse_preserve_merge import merge_fixed_budget, merge_multi_to_one
 from .binary_search import binary_search_T_linear, gradient_descent_T_linear
 
+from flashinfer.sampling import top_p_renorm_probs
+from flashinfer.quantization import segment_packbits
+
 
 class RKV:
     def __init__(
@@ -44,8 +47,9 @@ class RKV:
         effective_kv_head_lens=None,
         *args,
     ):
-        head_dim = query_states.shape[-1]
+        bsz, num_heads, q_cache_len, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
+        num_kv_heads = key_states.shape[1]
 
         if kv_cache_len < self.budget:
             return {
@@ -104,9 +108,13 @@ class RKV:
             #     self.p_attn,
             # )
 
+            shifted_probs -= shifted_probs.amin(dim=-1, keepdim=True).detach()
+            shifted_probs = shifted_probs / shifted_probs.sum(dim=-1, keepdim=True)
+            shift_logits = torch.log(shifted_probs + 1e-10)
+            
             attn_cache, T = gradient_descent_T_linear(
                 attn_weights_sum,
-                shifted_probs,
+                shift_logits,
                 self.p_attn,
             )
 
@@ -139,23 +147,36 @@ class RKV:
                 )
 
             else:
-                indices = attn_cache.topk(
-                    self.budget - self.window_size - self.sink_size, dim=-1
-                ).indices
-                indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
-
-                k_compress = key_states[:, :, self.sink_size: -self.window_size, :].gather(
-                    dim=2, index=indices
-                )
-                v_compress = value_states[:, :, self.sink_size: -self.window_size, :].gather(
-                    dim=2, index=indices
-                )
+                selected_mask_full = torch.zeros(num_kv_heads, kv_cache_len, dtype=torch.bool, device=key_states.device)
+                
+                attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=self.p_attn)
+                
+                unselected_mask = (attn_topp_normed == torch.zeros_like(attn_topp_normed))
+                
+                unselected_mask = unselected_mask.reshape(num_kv_heads, -1)
+                
+                selected_mask = ~unselected_mask
+                
+                selected_mask_full[:, self.sink_size : -self.window_size] = selected_mask
+                
+                # save the top budget indices
+                indices_desc_topk = attn_cache.squeeze(0).topk(self.budget - self.window_size, dim=-1).indices
+                selected_mask_full.scatter_(-1, indices_desc_topk + self.sink_size, True)
+                
+                selected_mask_full[..., :self.sink_size] = True
+                selected_mask_full[..., -self.window_size:] = True
+                
+                mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * kv_cache_len
+                
+                packed_selected_mask, mask_indptr_new = segment_packbits(selected_mask_full.view(-1), mask_indptr, bitorder="little")
+                
+                packed_selected_mask = packed_selected_mask.view(8, -1)
             
-            k_sink = key_states[:, :, : self.sink_size, :]
-            v_sink = value_states[:, :, : self.sink_size, :]
-            k_cur = key_states[:, :, -self.window_size :, :]
-            v_cur = value_states[:, :, -self.window_size :, :]
-            key_states = torch.cat([k_sink, k_compress, k_cur], dim=2)
-            value_states = torch.cat([v_sink, v_compress, v_cur], dim=2)
+            # k_sink = key_states[:, :, : self.sink_size, :]
+            # v_sink = value_states[:, :, : self.sink_size, :]
+            # k_cur = key_states[:, :, -self.window_size :, :]
+            # v_cur = value_states[:, :, -self.window_size :, :]
+            # key_states = torch.cat([k_sink, k_compress, k_cur], dim=2)
+            # value_states = torch.cat([v_sink, v_compress, v_cur], dim=2)
             
-            return {"key_states": key_states, "value_states": value_states}
+            return {"key_states": key_states, "value_states": value_states, "packed_selected_mask": packed_selected_mask}

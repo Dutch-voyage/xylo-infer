@@ -464,7 +464,7 @@ class CacheManager(BaseService):
         append_item_to_seq_log("num_blocks_head", seq.seq_id, seq.num_blocks_head.int().detach().cpu())
         
         seq.num_blocks_head = cu_num_block_head
-                
+        
         gather_req_to_token_pool_headwise(
             self.seq_to_slot_pool, 
             self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices, 

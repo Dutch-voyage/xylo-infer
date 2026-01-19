@@ -26,10 +26,10 @@ from src.artifacts.nanovllm_v8.cache_mngr.headwise import CacheManager
 # from src.artifacts.nanovllm_v8.cache_mngr.layerwise import CacheManager
 from src.artifacts.nanovllm_v8.cache_mngr.nocompress import NoCompress
 # from src.artifacts.nanovllm_v8.cache_mngr.snapKV import SnapKV
-from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised import SnapKV
+from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised_topp import SnapKV
 # from src.artifacts.nanovllm_v8.cache_mngr.RKV import RKV
-from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_v2 import RKV
-# from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised import RKV
+# from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_v2 import RKV
+from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_topp import RKV
 
 from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp_revised import VanillaToppKV
 

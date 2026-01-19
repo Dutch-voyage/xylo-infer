@@ -85,11 +85,8 @@ def calculate_mass_differentiable(shifted_logits, T, num_selected, transform_fun
     mass = (probs * mask).sum(dim=-1)
     return mass
 
-def calculate_mass_differentiable_linear(shifted_probs, T, num_selected):
+def calculate_mass_differentiable_linear(logits, T, num_selected):
     """Differentiable version of calculate_mass for gradient descent."""
-    shifted_probs -= shifted_probs.amin(dim=-1, keepdim=True).detach()
-    shifted_probs = shifted_probs / shifted_probs.sum(dim=-1, keepdim=True)
-    logits = torch.log(shifted_probs + 1e-10)
     logits = logits / T.unsqueeze(-1)
     logits -= logits.amax(dim=-1, keepdim=True).detach()
     probs = F.softmax(logits, dim=-1)
@@ -147,19 +144,21 @@ def binary_search_T(raw_logits, anchor_p, transform_func):
     
     return transformed_logits, T_mid
 
-def gradient_descent_T(raw_logits, anchor_p, transform_func, lr=1e-2, max_iters=50):
+def count_topp_selected(probs, p):
+    normed_probs = top_p_renorm_probs(probs, top_p=p)
+    selected_mask = (normed_probs != torch.zeros_like(normed_probs))
+    num_selected = selected_mask.sum(dim=-1)
+    return num_selected
+
+def gradient_descent_T(raw_logits, anchor_p, transform_func, lr=1e-2, max_iters=10):
     bsz, num_heads, q_cache_len, kv_cache_len = raw_logits.shape
     # bsz, num_heads, kv_cache_len = raw_logits.shape
     raw_logits = raw_logits.reshape(-1, kv_cache_len)
     T = torch.full((bsz * num_heads,), 0.5, device="cuda", dtype=torch.float32, requires_grad=True)
     optimizer = torch.optim.Adam([T], lr=lr)
-    # optimizer = torch.optim.SGD([T], lr=lr, momentum=0.9, weight_decay=1e-4, nesterov=True)
+    # optimizer = torch.optim.SGD([T], lr=lr, momentum=0.9, weight_decay=1e-4, nesterov=True)    
+    num_selected_oracle = count_topp_selected(F.softmax(raw_logits, dim=-1), anchor_p)
 
-    normed_probs = top_p_renorm_probs(F.softmax(raw_logits, dim=-1), top_p=anchor_p)
-    selected_indices = torch.vmap(partial(torch.nonzero_static, size=normed_probs.shape[-1]), in_dims=(0,))(normed_probs).squeeze(-1)
-    num_selected_oracle = gather_num_selected(
-        selected_indices
-    )
 
     for iter in range(max_iters):
         # Use differentiable version for gradient-based optimization
@@ -175,9 +174,11 @@ def gradient_descent_T(raw_logits, anchor_p, transform_func, lr=1e-2, max_iters=
             break
     # print(cu_mass.max().item(), cu_mass.min().item(), cu_mass.mean().item())
     # print("-" * 100)
-    T = T.detach().reshape(bsz, num_heads)
+    # print(count_topp_selected(F.softmax(raw_logits, dim=-1), anchor_p))
+    
+    raw_logits /= T.unsqueeze(-1)
+    
     raw_logits = raw_logits.reshape(bsz, num_heads, q_cache_len, kv_cache_len)
-    raw_logits = raw_logits / T.unsqueeze(-1).unsqueeze(-1)
     transformed_logits = transform_func(raw_logits.view(-1, kv_cache_len)).view(bsz, num_heads, q_cache_len, kv_cache_len)
     
     # T = T.detach().reshape(bsz, num_heads)
@@ -187,23 +188,20 @@ def gradient_descent_T(raw_logits, anchor_p, transform_func, lr=1e-2, max_iters=
     
     return transformed_logits, T
 
-def gradient_descent_T_linear(raw_probs, shifted_probs, anchor_p, lr=1e-2, max_iters=50):
+def gradient_descent_T_linear(raw_probs, shifted_logits, anchor_p, lr=1e-2, max_iters=10):
     # bsz, num_heads, q_cache_len, kv_cache_len = raw_probs.shape
-    bsz, num_heads, kv_cache_len = shifted_probs.shape
-    shifted_probs = shifted_probs.reshape(-1, kv_cache_len)
+    bsz, num_heads, kv_cache_len = shifted_logits.shape
+    shifted_logits = shifted_logits.reshape(-1, kv_cache_len)
     raw_probs = raw_probs.reshape(-1, kv_cache_len)
     T = torch.full((raw_probs.shape[0],), 0.5, device="cuda", dtype=torch.float32, requires_grad=True)
     optimizer = torch.optim.Adam([T], lr=lr)
-
-    normed_probs = top_p_renorm_probs(raw_probs, top_p=anchor_p)
-    selected_indices = torch.vmap(partial(torch.nonzero_static, size=normed_probs.shape[-1]), in_dims=(0,))(normed_probs).squeeze(-1)
-    num_selected_oracle = gather_num_selected(
-        selected_indices
-    )
-
+    
+    num_selected_oracle = count_topp_selected(raw_probs, anchor_p)
+    # print(num_selected_oracle)
+        
     for iter in range(max_iters):
         # Use differentiable version for gradient-based optimization
-        cu_mass = calculate_mass_differentiable_linear(shifted_probs, T, num_selected_oracle)
+        cu_mass = calculate_mass_differentiable_linear(shifted_logits, T, num_selected_oracle)
         loss = torch.mean((cu_mass - anchor_p) ** 2)
         # loss = torch.mean(torch.abs(cu_mass - anchor_p))
         optimizer.zero_grad()
@@ -214,14 +212,21 @@ def gradient_descent_T_linear(raw_probs, shifted_probs, anchor_p, lr=1e-2, max_i
             T.clamp_(min=1e-3, max=10.0)
         if torch.abs(cu_mass - anchor_p).max() < 1e-2:
             break
-    # print(cu_mass.max().item(), cu_mass.min().item(), cu_mass.mean().item())
-    # print(T.max().item(), T.min().item())
-    # print("-" * 100)
-    # T = T.detach().reshape(bsz, num_heads, q_cache_len)
-    T = T.detach().reshape(bsz, num_heads)
+    
+    # print(cu_mass.mean().item())
+    
+    # print(count_topp_selected(F.softmax(shifted_logits, dim=-1), anchor_p))
+    
+    # T = T.detach().reshape(bsz, num_heads)
     # shifted_probs = shifted_probs.reshape(bsz, num_heads, q_cache_len, kv_cache_len)
+    shifted_logits /= T.unsqueeze(-1)
+    shifted_logits -= shifted_logits.amax(dim=-1, keepdim=True)
+    shifted_probs = torch.softmax(shifted_logits, dim=-1)
+    
+    # print(count_topp_selected(F.softmax(shifted_logits, dim=-1), anchor_p))
+    # print("-" * 100)
+    
     shifted_probs = shifted_probs.reshape(bsz, num_heads, kv_cache_len)
-    shifted_probs = torch.softmax(torch.log(shifted_probs + 1e-10) / T.unsqueeze(-1), dim=-1)
     return shifted_probs, T
 
 
