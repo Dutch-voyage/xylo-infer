@@ -166,8 +166,10 @@ class RKV:
                 
                 selected_mask_full[:, self.sink_size : -self.window_size] = selected_mask
                 
+                k = min(self.budget - self.window_size - self.sink_size, kv_cache_len - self.sink_size - self.window_size)
+                
                 # save the top budget indices
-                indices_desc_topk = attn_cache.squeeze(0).topk(self.budget - self.window_size, dim=-1).indices
+                indices_desc_topk = attn_cache.squeeze(0).topk(k, dim=-1).indices
                 selected_mask_full.scatter_(-1, indices_desc_topk + self.sink_size, True)
                 
                 selected_mask_full[..., :self.sink_size] = True
