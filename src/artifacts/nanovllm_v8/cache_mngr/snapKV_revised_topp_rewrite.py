@@ -174,11 +174,6 @@ class SnapKV:
                 selected_mask.scatter_(-1, window_indices, 0)
                 selected_mask.masked_fill_((~effective_mask).squeeze(0).squeeze(1), 0)
 
-                # if kwargs["layer_id"] == 0:
-                #     print(window_indices)
-                #     print(kv_cache_len)
-                #     print("-" * 100)
-                
                 key_sink = key_states[:, :, : self.sink_size, :]
                 value_sink = value_states[:, :, : self.sink_size, :]
                 
@@ -223,20 +218,5 @@ class SnapKV:
                 
                 key_states = key_states.transpose(1, 2).squeeze(0).contiguous()
                 value_states = value_states.transpose(1, 2).squeeze(0).contiguous()
-                
-                # packed_selected_mask, mask_indptr_new = segment_packbits(selected_mask_full.view(-1), mask_indptr, bitorder="little")
-                
-                # packed_selected_mask = packed_selected_mask.view(8, -1)
-            
-            # k_sink = key_states[:, :, : self.sink_size, :]
-            # v_sink = value_states[:, :, : self.sink_size, :]
-            # k_cur = key_states[:, :, -self.window_size :, :]
-            # v_cur = value_states[:, :, -self.window_size :, :]
-            # key_states = torch.cat([k_sink, k_compress, k_cur], dim=2)
-            # value_states = torch.cat([v_sink, v_compress, v_cur], dim=2)
-            
-            # print(key_states.shape)
-            
-            # return {"key_states": key_states, "value_states": value_states, "packed_selected_mask": packed_selected_mask}
-                        
+                                        
             return {"key_states": key_states, "value_states": value_states, "packed_selected_mask": packed_selected_mask, "num_blocks_this_layer": num_blocks_max_heads}

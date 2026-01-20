@@ -90,7 +90,7 @@ class ModelRunner(BaseService):
         if self.config.compress_method == "none":
             self.compressor = NoCompress(config, window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "rkv":
-            self.compressor = RKV(config, window_size=config.query_window_size, budget=config.layer_budget)
+            self.compressor = RKV(config, window_size=config.query_window_size, budget=config.layer_budget, upper_budget=config.layer_upper_budget)
         elif self.config.compress_method == "snapkv":
             self.compressor = SnapKV(config, window_size=config.query_window_size, budget=config.layer_budget, upper_budget=config.layer_upper_budget)
         elif self.config.compress_method == "vanilla_topp": 

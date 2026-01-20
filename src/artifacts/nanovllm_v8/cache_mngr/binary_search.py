@@ -87,6 +87,7 @@ def calculate_mass_differentiable(shifted_logits, T, num_selected, transform_fun
 
 def calculate_mass_differentiable_linear(logits, T, num_selected):
     """Differentiable version of calculate_mass for gradient descent."""
+    T = T.unsqueeze(-1).repeat(1, logits.shape[0] // T.shape[0]).reshape(-1)
     logits = logits / T.unsqueeze(-1)
     logits -= logits.amax(dim=-1, keepdim=True).detach()
     probs = F.softmax(logits, dim=-1)
@@ -197,14 +198,17 @@ def gradient_descent_T(raw_logits, anchor_p, transform_func, lr=1e-2, max_iters=
     return transformed_logits, T
 
 def gradient_descent_T_linear(raw_probs, shifted_logits, anchor_p, lr=1e-2, max_iters=10):
-    # bsz, num_heads, q_cache_len, kv_cache_len = raw_probs.shape
-    bsz, num_heads, kv_cache_len = shifted_logits.shape
+    bsz, num_heads, q_cache_len, kv_cache_len = shifted_logits.shape
+    # bsz, num_heads, kv_cache_len = shifted_logits.shape
     shifted_logits = shifted_logits.reshape(-1, kv_cache_len)
     raw_probs = raw_probs.reshape(-1, kv_cache_len)
-    T = torch.full((raw_probs.shape[0],), 0.5, device="cuda", dtype=torch.float32, requires_grad=True)
+    T = torch.full((bsz, num_kv_heads), 0.5, device="cuda", dtype=torch.float32, requires_grad=True)
+    # T = torch.full((raw_probs.shape[0],), 0.5, device="cuda", dtype=torch.float32, requires_grad=True)
     optimizer = torch.optim.Adam([T], lr=lr)
     
     num_selected_oracle = count_topp_selected(raw_probs, anchor_p)
+    T = T.repeat(1, num_heads // num_kv_heads).reshape(-1)
+        
     # print(num_selected_oracle)
         
     for iter in range(max_iters):
@@ -227,6 +231,8 @@ def gradient_descent_T_linear(raw_probs, shifted_logits, anchor_p, lr=1e-2, max_
     
     # T = T.detach().reshape(bsz, num_heads)
     # shifted_probs = shifted_probs.reshape(bsz, num_heads, q_cache_len, kv_cache_len)
+    T = T.unsqueeze(-1).repeat(1, shifted_logits.shape[0] // T.shape[0]).reshape(-1)
+    
     shifted_logits /= T.unsqueeze(-1)
     shifted_logits -= shifted_logits.amax(dim=-1, keepdim=True)
     shifted_probs = torch.softmax(shifted_logits, dim=-1)
@@ -234,7 +240,7 @@ def gradient_descent_T_linear(raw_probs, shifted_logits, anchor_p, lr=1e-2, max_
     # print(count_topp_selected(F.softmax(shifted_logits, dim=-1), anchor_p))
     # print("-" * 100)
     
-    shifted_probs = shifted_probs.reshape(bsz, num_heads, kv_cache_len)
+    shifted_probs = shifted_probs.reshape(bsz, num_heads, q_cache_len, kv_cache_len)
     return shifted_probs, T
 
 
