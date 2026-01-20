@@ -42,6 +42,7 @@ def generate_answer(
     data_source="aime24",
     compress_method="rkv",
     layer_budget=1024,
+    layer_upper_budget=2048, 
     window_size=128,
     steps_between_cache_compressions=128,
     p_attn=0.9, 
@@ -55,6 +56,7 @@ def generate_answer(
         if_compress_kvcache=True,
         compress_method=compress_method,
         layer_budget=layer_budget + window_size,
+        layer_upper_budget=layer_upper_budget + window_size, 
         window_size=window_size,
         steps_between_cache_compressions=steps_between_cache_compressions,
         p_attn=p_attn, 
@@ -129,7 +131,7 @@ def generate_answer(
 
     # json.dump(evaluate_result, open(f"aime_{compress_method}_{layer_budget}_{window_size}_{steps_between_cache_compressions}.json", "w"))
     with open(
-        f"eval_results/{data_source}_compress_by_{compress_method}_p_attn_{p_attn}_layer_budget_{layer_budget}_window_size_{window_size}_steps_{steps_between_cache_compressions}.json",
+        f"eval_results/{data_source}_compress_by_{compress_method}_p_attn_{p_attn}_layer_budget_{layer_budget}_upper_{layer_upper_budget}_window_size_{window_size}_steps_{steps_between_cache_compressions}.json",
         "w",
     ) as f:
         json.dump(evaluate_result, f, indent=4)
@@ -142,7 +144,7 @@ def generate_answer(
         f"Average generated tokens: {total_generate_lengths / (len(dataset))}" + "\n\n"
     )
     with open(
-        f"aime_{compress_method}_{layer_budget}_{window_size}_{steps_between_cache_compressions}",
+        f"aime_{compress_method}_{layer_budget}_{layer_upper_budget}_{window_size}_{steps_between_cache_compressions}",
         "a",
     ) as f:
         f.write(summary)
@@ -174,6 +176,7 @@ def main():
         "--compress_method", type=str, default="rkv", choices=["rkv", "snapkv", "vanilla_topp"]
     )
     parser.add_argument("--layer_budget", type=int, default=1024)
+    parser.add_argument("--layer_upper_budget", type=int, default=2048)
     parser.add_argument("--window_size", type=int, default=128)
     parser.add_argument("--steps_between_cache_compressions", type=int, default=128)
     
@@ -188,6 +191,7 @@ def main():
         model_path=args.model_path,
         compress_method=args.compress_method,
         layer_budget=args.layer_budget,
+        layer_upper_budget=args.layer_budget * 2, 
         window_size=args.window_size,
         steps_between_cache_compressions=args.steps_between_cache_compressions,
         p_attn=args.p_attn, 
