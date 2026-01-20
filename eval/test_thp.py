@@ -33,20 +33,20 @@ class Dataset_with_template(Dataset):
     def __len__(self):
         return len(self.dataframe)
 
-    
+
 def generate_answer(local_dir="datasets", model_path="/home/yyx/models/Qwen3-4B"):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     llm = LLM(model_path, 
               enforce_eager=False, 
               tensor_parallel_size=1, 
               if_compress_kvcache=True,
-              if_fake_compress=True,
-              lse_preserve_merge=True,
-              compress_method="vanilla_topp",
+              if_fake_compress=False,
+              lse_preserve_merge=False,
+              compress_method="snapkv",
               layer_budget=512,
               query_window_size=32,
-              p_attn=0.95,
-              steps_between_cache_compressions=32
+              p_attn=0.90,
+              steps_between_cache_compressions=32, 
               )
     
     # sampling_params = SamplingParams(temperature=0.6 ,top_k=20, top_p=0.95, max_tokens=1024)
@@ -59,17 +59,17 @@ def generate_answer(local_dir="datasets", model_path="/home/yyx/models/Qwen3-4B"
     outputs = llm.generate(prompts, sampling_params)
     input_ids_0 = tokenizer(prompts[0], return_tensors="pt").input_ids[0]
     output_ids_0 = tokenizer(outputs[0]["text"], return_tensors="pt").input_ids[0]
-    input_ids_1 = tokenizer(prompts[7], return_tensors="pt").input_ids[0]
-    output_ids_1 = tokenizer(outputs[7]["text"], return_tensors="pt").input_ids[0]
+    input_ids_1 = tokenizer(prompts[-1], return_tensors="pt").input_ids[0]
+    output_ids_1 = tokenizer(outputs[-1]["text"], return_tensors="pt").input_ids[0]
     
     print(f"req {0}:\n")
     print(f"total input tokens {len(input_ids_0)}")
     print(f"total output tokens {len(output_ids_0)}")
     
-    print(f"req {7}:\n")
+    print(f"req {-1}:\n")
     print(f"total input tokens {len(input_ids_1)}")
     print(f"total output tokens {len(output_ids_1)}")
-    all_text = prompts[0] + outputs[0]["text"]  +"\n" + prompts[7] + outputs[7]["text"]
+    all_text = prompts[0] + outputs[0]["text"]  +"\n" + prompts[-1] + outputs[-1]["text"]
     # generated_text = outputs[0]["text"]
     with open("aime_5_answer_test", "w") as f:
         f.write(all_text)
