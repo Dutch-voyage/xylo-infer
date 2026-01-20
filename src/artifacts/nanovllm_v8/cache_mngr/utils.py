@@ -25,7 +25,7 @@ def gather_selected_kv(kv_cache, indicator):
     # Optional: If nothing is selected, return empty tensor
     if max_selected_len == 0:
         return torch.zeros((bsz, num_kv_heads, 0, head_dim), 
-                           device=kv_cache.device, dtype=kv_cache.dtype)
+                           device=kv_cache.device, dtype=kv_cache.dtype), num_selected
 
     # 2. Get gather indices using Stable Sort
     #    descending=True puts 1s (True) before 0s (False).
@@ -38,17 +38,18 @@ def gather_selected_kv(kv_cache, indicator):
     # 3. Gather the KV cache
     #    We need to expand indices to match the head_dim
     gather_indices_expanded = gather_indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
+    
     selected_kv = torch.gather(kv_cache, 2, gather_indices_expanded)
 
-    # 4. Zero out padding (The 'gather' pulled unselected tokens into the padding slots)
-    #    Create a mask: [1, 1, max_selected] < [bsz, num_heads, 1]
-    range_vector = torch.arange(max_selected_len, device=kv_cache.device).view(1, 1, -1)
-    mask = range_vector < num_selected.unsqueeze(-1)
+    # # 4. Zero out padding (The 'gather' pulled unselected tokens into the padding slots)
+    # #    Create a mask: [1, 1, max_selected] < [bsz, num_heads, 1]
+    # range_vector = torch.arange(max_selected_len, device=kv_cache.device).view(1, 1, -1)
+    # mask = range_vector < num_selected.unsqueeze(-1)
     
-    #    Apply mask
-    selected_kv = selected_kv * mask.unsqueeze(-1)
+    # #    Apply mask
+    # selected_kv = selected_kv * mask.unsqueeze(-1)
 
-    return selected_kv
+    return selected_kv, num_selected
 
 """
 The spin lock design is adapted from Cut-Cross-Entropy

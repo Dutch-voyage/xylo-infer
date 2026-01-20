@@ -38,6 +38,7 @@ class SnapKV:
         key_states,
         value_states,
         effective_kv_head_lens=None,
+        effective_mask=None, 
         *args, 
     ):
         bsz, num_heads, q_cache_len, head_dim = query_states.shape
@@ -60,6 +61,8 @@ class SnapKV:
                 
                 effective_mask = indices < lengths.to(indices.device)
 
+                attn_weights = attn_weights.masked_fill(~effective_mask.unsqueeze(2), float("-inf"))
+            if effective_mask is not None:
                 attn_weights = attn_weights.masked_fill(~effective_mask.unsqueeze(2), float("-inf"))
 
             raw_attn_weights = attn_weights[:, :, :, self.sink_size : -self.window_size]# .view(-1, kv_cache_len - self.window_size)

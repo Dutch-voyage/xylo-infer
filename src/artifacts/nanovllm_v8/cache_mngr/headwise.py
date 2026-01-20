@@ -464,7 +464,7 @@ class CacheManager(BaseService):
         append_item_to_seq_log("num_blocks_head", seq.seq_id, seq.num_blocks_head.int().detach().cpu())
         
         seq.num_blocks_head = cu_num_block_head
-        
+
         gather_req_to_token_pool_headwise(
             self.seq_to_slot_pool, 
             self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices, 
@@ -474,88 +474,117 @@ class CacheManager(BaseService):
         )
 
         cu_headwise_mask_layer_transpose = generate_packed_mask(seq.num_blocks_head)[None, ...].repeat(self.num_layers, 1, 1).to("cpu")
-        seq.headwise_mask_layer_transpose = cu_headwise_mask_layer_transpose
+        seq.headwise_mask_layer_transpose = cu_headwise_mask_layer_transpose.contiguous()
         
         seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_head % 8)
 
         seq.next_mask = seq.next_mask.to(torch.uint8)
 
-    def _rewrite_organize(self, seq):
-        cu_seq_pool_indices = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
-        
-        cu_seq_pool = self.seq_to_slot_pool[cu_seq_pool_indices, :seq.num_blocks_max_heads]   
-        
-        prod_pruned_mask = torch.prod(1 - uint8_to_bits(seq.headwise_mask_layer_transpose)[..., :seq.num_blocks_max_heads], dim=0)
-        
-        for head_id in range(self.num_kv_heads):
-            prod_pruned_mask[head_id, seq.num_blocks_head[head_id]:] = 0
-        
-        pruned_indices = torch.nonzero(prod_pruned_mask, as_tuple=True)
-        
-        pruned_indices_token = cu_seq_pool[pruned_indices] 
-        
-        if pruned_indices_token.numel() == 0:
-            return
-        
-        # seq.block_id_to_count[(pruned_indices_token // 8).tolist()] += 1
-        
-        # for block_id in (pruned_indices_token // 8).unique().tolist():
-        #     count = seq.block_id_to_count[block_id.item()]
-        #     if count == self.num_kv_heads:
-        #         self._deallocate_block(block_id)
-        #         seq.block_table.remove(block_id)
-        #         seq.block_id_to_count.pop(block_id)
-        
-        kept_mask = torch.isin(cu_seq_pool, pruned_indices_token, invert=True)
-        
-        for head_id in range(self.num_kv_heads):
-            kept_mask[head_id, seq.num_blocks_head[head_id]:] = 0
-        
-        kept_indices = torch.nonzero(kept_mask).squeeze().to("cpu")
-
-        # print(torch.nonzero(~ kept_mask).squeeze().to("cpu"))
-        
-        # print(kept_indices)
-        
-        cu_kept_indices = kept_indices[:,0]
-        
-        cu_num_blocks_shifted_left = torch.cat([torch.zeros((1,), device="cpu", dtype=torch.int32), cu_kept_indices], dim=0)
-        
-        cu_num_blocks_shifted_right = torch.cat([cu_kept_indices, torch.zeros((1,), device="cpu", dtype=torch.int32)], dim=0)
-        
-        cu_num_blocks_diffs = cu_num_blocks_shifted_left - cu_num_blocks_shifted_right
-        
-        cu_num_block_head_cumsum = torch.nonzero(cu_num_blocks_diffs).squeeze(-1)
-        
-        cu_num_block_head = cu_num_block_head_cumsum - torch.cat([torch.zeros((1,), device="cpu", dtype=torch.int32), cu_num_block_head_cumsum[:-1]], dim=0)
-        
-        append_item_to_seq_log("num_blocks_head", seq.seq_id, seq.num_blocks_head.int().detach().cpu())
-        
-        seq.num_blocks_head = cu_num_block_head
-        
-        gather_req_to_token_pool_headwise(
-            self.seq_to_slot_pool, 
-            self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices, 
-            kept_indices[:, 1].to("cuda"), 
-            cu_num_block_head.to("cuda"), 
-            torch.cat([torch.zeros(1), cu_num_block_head_cumsum[:-1]]).to("cuda")
-        )
-
-        cu_headwise_mask_layer_transpose = generate_packed_mask(seq.num_blocks_head)[None, ...].repeat(self.num_layers, 1, 1).to("cpu")
-        seq.headwise_mask_layer_transpose = cu_headwise_mask_layer_transpose
-        
+    def _rewrite_placeholder(self, seq):
+        seq.num_blocks_head = seq.num_blocks_head - 1
         seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_head % 8)
 
         seq.next_mask = seq.next_mask.to(torch.uint8)
+    
+    def _rewrite_organize(self, seq: Sequence):       
+        num_blocks_head = seq.num_blocks_head
+        cu_num_block_head = uint8_to_bits(seq.headwise_mask_layer_transpose)[:, :seq.num_blocks_max_heads].to(torch.int32).sum(dim=-1).max(0).values
+        num_blocks_head = torch.maximum(num_blocks_head, cu_num_block_head)
+        seq.num_blocks_head = num_blocks_head
+        
+        seq.headwise_mask_layer_transpose = seq.headwise_mask_layer_transpose[..., :(seq.num_blocks_max_heads - 1) // 8 + 1].contiguous()
+        seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_max_heads % 8)
+        seq.next_mask = seq.next_mask.to(torch.uint8)
+        self.update_blocks_post_compression(seq, seq.num_blocks_max_heads)
+        
+        # cu_seq_pool_indices = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
+        
+        # cu_seq_pool = self.seq_to_slot_pool[cu_seq_pool_indices, :seq.num_blocks_max_heads]   
+        
+        # prod_pruned_mask = torch.prod(1 - uint8_to_bits(seq.headwise_mask_layer_transpose)[..., :seq.num_blocks_max_heads], dim=0)
+        
+        # for head_id in range(self.num_kv_heads):
+        #     prod_pruned_mask[head_id, seq.num_blocks_head[head_id]:] = 0
+        
+        # pruned_indices = torch.nonzero(prod_pruned_mask, as_tuple=True)
+        
+        # pruned_indices_token = cu_seq_pool[pruned_indices] 
+        
+        # if pruned_indices_token.numel() == 0:
+        #     return
+        
+        # kept_mask = torch.isin(cu_seq_pool, pruned_indices_token, invert=True)
+        
+        # for head_id in range(self.num_kv_heads):
+        #     kept_mask[head_id, seq.num_blocks_head[head_id]:] = 0
+        
+        # kept_indices = torch.nonzero(kept_mask).squeeze().to("cpu")
+        
+        # # # print(torch.nonzero(~ kept_mask).squeeze().to("cpu"))
+        
+        # # # print(kept_indices)
+        
+        # cu_kept_indices = kept_indices[:,0]
+        
+        # cu_num_blocks_shifted_left = torch.cat([torch.zeros((1,), device="cpu", dtype=torch.int32), cu_kept_indices], dim=0)
+        
+        # cu_num_blocks_shifted_right = torch.cat([cu_kept_indices, torch.zeros((1,), device="cpu", dtype=torch.int32)], dim=0)
+        
+        # cu_num_blocks_diffs = cu_num_blocks_shifted_left - cu_num_blocks_shifted_right
+        
+        # cu_num_block_head_cumsum = torch.nonzero(cu_num_blocks_diffs).squeeze(-1)
+        
+        # cu_num_block_head = cu_num_block_head_cumsum - torch.cat([torch.zeros((1,), device="cpu", dtype=torch.int32), cu_num_block_head_cumsum[:-1]], dim=0)
+        
+        # append_item_to_seq_log("num_blocks_head", seq.seq_id, seq.num_blocks_head.int().detach().cpu())
+        
+        # # print(self.seq_to_slot_pool[0, :seq.num_blocks_head[0]])
+        # # print(seq.headwise_mask_layer_transpose[0, 0, :seq.num_blocks_head[0]])
+
+        # # print(seq.num_blocks_head[0])
+        # # print(self.seq_to_slot_pool[0,:seq.num_blocks_head[0]])
+        # seq.num_blocks_head = cu_num_block_head
+        
+        # # print(seq.num_blocks_head)
+        
+        # gather_req_to_token_pool_headwise(
+        #     self.seq_to_slot_pool, 
+        #     self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices, 
+        #     kept_indices[:, 1].to("cuda"), 
+        #     cu_num_block_head.to("cuda"), 
+        #     torch.cat([torch.zeros(1), cu_num_block_head_cumsum[:-1]]).to("cuda")
+        # )
+        
+        # # print(seq.headwise_mask_layer_transpose[0, 0, :])        
+        # # print(seq.num_blocks_head[0])
+        # # print(self.seq_to_slot_pool[0,:seq.num_blocks_head[0]])
+        # # print("-" * 100)
+        # # print(seq.num_blocks_head)
+        
+        # # print(self.seq_to_slot_pool[0, :seq.num_blocks_head[0]])
+        
+        # # print("-" * 100)
+
+        # # cu_headwise_mask_layer_transpose = generate_packed_mask(seq.num_blocks_head)[None, ...].repeat(self.num_layers, 1, 1).to("cpu")
+        # # seq.headwise_mask_layer_transpose = cu_headwise_mask_layer_transpose
+
+        # seq.headwise_mask_layer_transpose = seq.headwise_mask_layer_transpose[..., :(seq.num_blocks_max_heads - 1) // 8 + 1].contiguous()
+        # self.update_blocks_post_compression(seq, seq.num_blocks_max_heads)
+    
+        # seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_head % 8)
+        # seq.next_mask = seq.next_mask.to(torch.uint8)
     
     def organize(self):
         for seq in self.cu_seqs:
             # print("\n"+ "-" * 100)
             # print(f"[Debug] before organize seq_id={seq.seq_id} effective seq len={seq.num_blocks_head}")
-            self._organize(seq)
-            
-            if not self.if_fake_compress:
-                self.update_blocks_post_compression(seq, seq.num_blocks_max_heads)
+            # self._organize(seq)
+            # self.update_blocks_post_compression(seq, seq.num_blocks_max_heads)
+            if self.if_fake_compress:
+                self._organize(seq)
+            else:
+                self._rewrite_organize(seq)
+                
             # print(f"[Debug] after organize seq_id={seq.seq_id} effective seq len={seq.num_blocks_head}")
     
     def allocate_prefill_page_indices(self, seqs: list[Sequence]):
@@ -708,6 +737,8 @@ class CacheManager(BaseService):
                 self.seq_to_slot_pool.stride(0)
             )
             
+            # print(self.cu_kv_page_indices)
+            # print("-" * 100)
             # print(self.seq_to_slot_pool[8, :headwise_seq_lens[8]])
             
             self.cu_kv_indptr = torch.cumsum(
@@ -724,7 +755,7 @@ class CacheManager(BaseService):
 
             self.cu_qo_indptr = torch.arange(len(seqs) * self.num_kv_heads + 1, device="cuda", dtype=torch.int32) # .to(torch.int32)
             
-            self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.view(self.num_layers, -1).to(device="cuda", dtype=torch.uint8) for seq in seqs], dim=-1)
+            self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.reshape(self.num_layers, -1).to(device="cuda", dtype=torch.uint8) for seq in seqs], dim=-1)
             
             context = get_context()
             context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
@@ -770,7 +801,15 @@ class CacheManager(BaseService):
     
     def _read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
         for seq in self.cu_seqs:
-            slot_mappings = self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads, :seq.num_blocks_max_heads].to(torch.int32) // self.num_kv_heads # indices of the first head
+            slot_mappings = torch.tensor(seq.block_table, device="cuda").to(torch.int32)
+            
+            #     cu_sqe_to_pool_id = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
+            
+            #     cu_seq_to_slot_pool = self.seq_to_slot_pool[cu_sqe_to_pool_id, :seq.num_blocks_max_heads]
+            
+            #     slot_mappings = cu_seq_to_slot_pool.to(torch.int32).max(dim=0).values // self.num_kv_heads # indices of the first head
+            
+            # slot_mappings = self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads, :seq.num_blocks_max_heads].to(torch.int32) // self.num_kv_heads # indices of the first head
             
             query_slot_mapping = torch.tensor([seq.query_block_id], device="cuda").to(torch.int32)
             
@@ -789,31 +828,59 @@ class CacheManager(BaseService):
             
             key = key.unsqueeze(0)
             value = value.unsqueeze(0)
-                        
+            
             ret = self.compressor.update_kv(
                 query.transpose(1, 2),
                 key.transpose(1, 2),
                 value.transpose(1, 2),
-                seq.num_blocks_head, 
-                layer_id,
+                # seq.num_blocks_head,
+                # effective_mask=uint8_to_bits(seq.headwise_mask_layer_transpose[layer_id]).view(self.num_kv_heads, -1)[:, :seq.num_blocks_max_heads].to(torch.bool), 
+                effective_mask=uint8_to_bits(seq.headwise_mask_layer_transpose[layer_id]).view(self.num_kv_heads, -1)[:, :len(seq.block_table)].to(torch.bool), 
+                seq_id=seq.seq_id,
+                layer_id=layer_id,
             )
             
             updated_k = ret["key_states"]
             updated_v = ret["value_states"]
             
             if "packed_selected_mask" in ret:
-                seq.headwise_mask_layer_transpose[layer_id] = (seq.headwise_mask_layer_transpose[layer_id].clone().to("cuda") & ret["packed_selected_mask"])
+                # print(seq.headwise_mask_layer_transpose[layer_id][7])
+                if self.if_fake_compress:
+                    seq.headwise_mask_layer_transpose[layer_id] = (seq.headwise_mask_layer_transpose[layer_id].clone().to("cuda") & ret["packed_selected_mask"])
+                else:
+                    packed_selected_mask_full = torch.zeros_like(seq.headwise_mask_layer_transpose[layer_id], device="cuda")
+                    
+                    packed_selected_mask_full[:, :ret["packed_selected_mask"].shape[-1]] = ret["packed_selected_mask"].clone()
+                    if layer_id == 35:
+                        print(seq.headwise_mask_layer_transpose[layer_id, -1])
+                        print(packed_selected_mask_full[-1])
+                        print("-" * 100)
+                    seq.headwise_mask_layer_transpose[layer_id] = packed_selected_mask_full
+                    # if layer_id == 0:
+                    #     print(seq.headwise_mask_layer_transpose[layer_id])
+                    #     print("-" * 100)
+                # print(ret["packed_selected_mask"][7])
+                # print(seq.headwise_mask_layer_transpose[layer_id][7])
+                # print("-" * 100)
+                
+                # if layer_id == 0: 
+                #     print(seq.headwise_mask_layer_transpose[layer_id])
             
             if not self.if_fake_compress:
                 if "num_blocks_this_layer" not in ret:
                     return 
-                slot_mappings_packed_store = self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads, :ret["num_blocks_this_layer"]].to(torch.int32) // self.num_kv_heads
-                                
+                assert ret["num_blocks_this_layer"] == updated_k.shape[0], f"num_blocks_this_layer {ret['num_blocks_this_layer']} vs updated_k {updated_k.shape}"
+                slot_mappings_packed_store = slot_mappings[: ret["num_blocks_this_layer"]]
+                # if ret["num_blocks_this_layer"] < slot_mappings.shape[0]:
+                    # print(slot_mappings)
+                    # print(slot_mappings_packed_store)
+                    # print("-" * 100)
+                
                 store_kvcache(
                     key=updated_k,
                     value=updated_v,
-                    k_cache=k_cache,
-                    v_cache=v_cache,
+                    k_cache=k_cache.contiguous(),
+                    v_cache=v_cache.contiguous(),
                     slot_mapping=slot_mappings_packed_store,
                 )
                 
@@ -870,7 +937,7 @@ class CacheManager(BaseService):
             updated_v = ret["value_states"]
             
             if "packed_selected_mask" in ret:
-                seq.headwise_mask_layer_transpose[layer_id] = (seq.headwise_mask_layer_transpose[layer_id].clone().to("cuda") & ret["packed_selected_mask"])
+                seq.headwise_mask_layer_transpose[layer_id] = (seq.headwise_mask_layer_transpose[layer_id].clone().to("cuda") & ret["packed_selected_mask"]).contiguous()
             
             updated_k_list.append(updated_k.transpose(1, 2).squeeze(0).contiguous())
             updated_v_list.append(updated_v.transpose(1, 2).squeeze(0).contiguous())

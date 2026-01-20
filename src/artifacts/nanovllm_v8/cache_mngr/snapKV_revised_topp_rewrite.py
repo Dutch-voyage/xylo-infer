@@ -23,14 +23,15 @@ class SnapKV:
         self.budget = budget
         self.sink_size = 1
         self.window_size = window_size - self.sink_size
+        self.window_size = 32
+        
         self.kernel_size = kernel_size
 
         self.lse_preserve_merge = config.lse_preserve_merge
         self.if_log_compress = config.if_log_compress
         self.p_attn = config.p_attn
         
-        # for recording kept token indices
-        self.record_kept_token_indices = record_kept_token_indices
+        self.temperatures = {}
 
     def update_kv(
         self,
@@ -38,7 +39,10 @@ class SnapKV:
         key_states,
         value_states,
         effective_kv_head_lens=None,
+        effective_mask=None,
+        seq_id=None, 
         *args, 
+        **kwargs, 
     ):
         bsz, num_heads, q_cache_len, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
@@ -61,8 +65,30 @@ class SnapKV:
                 effective_mask = indices < lengths.to(indices.device)
 
                 attn_weights = attn_weights.masked_fill(~effective_mask.unsqueeze(2), float("-inf"))
+            if effective_mask is not None:
+                effective_mask = effective_mask.unsqueeze(0).unsqueeze(2).to(key_states.device)
+                attn_weights = attn_weights.masked_fill(~effective_mask, float("-inf"))
+                
+                indices = torch.arange(kv_cache_len, device=key_states.device).unsqueeze(0).expand(bsz, -1)
+    
+                # 2. Mark invalid positions with -1 so they are not selected.
+                # We use -1 because we will look for the largest indices (the "last" ones).
+                # valid indices are >= 0, so -1 will always be smaller/filtered out by topk.
+                masked_indices = indices.masked_fill(~effective_mask, -1)
+                
+                # 3. Find the indices of the last 'window_len' valid tokens.
+                # topk gives us the largest values (i.e., the indices of the latest tokens).
+                # Note: If a batch has fewer than window_len valid tokens, this will pick -1s.
+                # You may need to handle that edge case depending on your padding strategy.
+                
+                # _, window_indices = torch.topk(masked_indices, k=256, dim=-1)
+                _, window_indices = torch.topk(masked_indices, k=self.window_size, dim=-1)
+                
+                window_indices = window_indices.squeeze(0).squeeze(1)
 
-            raw_attn_weights = attn_weights[:, :, :, self.sink_size : -self.window_size]# .view(-1, kv_cache_len - self.window_size)
+            # raw_attn_weights = attn_weights[:, :, :, self.sink_size : -self.window_size]# .view(-1, kv_cache_len - self.window_size)
+            
+            raw_attn_weights = attn_weights
             
             def transform(attn_weights):
                 transformed_attn = F.max_pool1d(
@@ -74,7 +100,22 @@ class SnapKV:
                 return transformed_attn
 
             # attn_weights, T = binary_search_T(raw_attn_weights, self.p_attn, transform)
-            attn_weights, T = gradient_descent_T(raw_attn_weights, self.p_attn, transform)
+            # attn_weights, T = gradient_descent_T(raw_attn_weights, self.p_attn, transform)
+            
+            if seq_id not in self.temperatures.keys():  
+                attn_weights, T = gradient_descent_T(
+                    raw_attn_weights,
+                    self.p_attn,
+                    transform,
+                )
+                self.temperatures[seq_id] = T
+            else:
+                T = self.temperatures[seq_id]
+                raw_logits = raw_attn_weights.reshape(-1, raw_attn_weights.shape[-1])
+                raw_logits /= T.unsqueeze(-1)
+                attn_weights = transform(raw_logits).view(bsz, num_kv_heads, q_cache_len, -1)
+            
+            attn_weights = attn_weights.masked_fill(~effective_mask, float("-inf"))
             
             attn_cache = (
                 nn.functional.softmax(
@@ -108,36 +149,80 @@ class SnapKV:
                 unselected_mask_full = torch.zeros(num_kv_heads, q_cache_len, kv_cache_len, dtype=torch.bool, device=key_states.device)
                 
                 attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=self.p_attn)
-                
+                                
                 unselected_mask = (attn_topp_normed == torch.zeros_like(attn_topp_normed))
                 
                 unselected_mask = unselected_mask.reshape(num_kv_heads, q_cache_len, -1)
                 
-                unselected_mask_full[..., self.sink_size : -self.window_size] = unselected_mask
+                unselected_mask_full = unselected_mask
                 
-                k = min(self.budget - self.window_size - self.sink_size, attn_cache.shape[-1])
-                # save the top budget indices
+                k = min(self.budget - self.sink_size - self.window_size, attn_cache.shape[-1])
+                
+                # # save the top budget indices
                 indices_desc_topk = attn_cache.squeeze(0).topk(k, dim=-1).indices
-                unselected_mask_full.scatter_(-1, indices_desc_topk + self.sink_size, False)
+                unselected_mask_full.scatter_(-1, indices_desc_topk, False)
                 
-                unselected_mask_full[..., :self.sink_size] = False
-                unselected_mask_full[..., -self.window_size:] = False
+                selected_mask = ~(torch.prod(unselected_mask_full.to(torch.int32), dim=-2).to(torch.bool))
+                # if kwargs["layer_id"] == 0:
+                #     print(selected_mask[0])
+
+                # if kwargs["layer_id"] == 35:
+                #     print(selected_mask)
                 
-                selected_mask_full = ~(torch.prod((unselected_mask_full).to(torch.int32), dim=-2).to(torch.bool))
+                # selected_mask = torch.ones(num_kv_heads, kv_cache_len, dtype=torch.bool, device=key_states.device)
                 
-                key_states = gather_selected_kv(key_states, selected_mask_full.unsqueeze(0))
-                value_states = gather_selected_kv(value_states, selected_mask_full.unsqueeze(0))
+                selected_mask[..., :self.sink_size] = False
                 
-                num_blocks_head = selected_mask_full.to(torch.int32).sum(-1)
+                selected_mask.scatter_(-1, window_indices, False)
                 
-                organized_selected_mask = torch.zeros_like(selected_mask_full)
+                # print(selected_mask_full)
+                
+                # selected_mask.masked_fill_((~effective_mask).squeeze(0).squeeze(1), False)
+
+                # if kwargs["layer_id"] == 0:
+                #     print(window_indices)
+                #     print(kv_cache_len)
+                #     print("-" * 100)
+                
+                key_sink = key_states[:, :, : self.sink_size, :]
+                value_sink = value_states[:, :, : self.sink_size, :]
+                
+                key_window = torch.gather(
+                    key_states,
+                    2,
+                    window_indices.unsqueeze(0).unsqueeze(-1).expand(bsz, -1, -1, head_dim),
+                )
+                value_window = torch.gather(
+                    value_states,
+                    2,
+                    window_indices.unsqueeze(0).unsqueeze(-1).expand(bsz, -1, -1, head_dim),
+                )
+                
+                key_states, num_selected = gather_selected_kv(key_states, selected_mask.unsqueeze(0))
+                value_states, _ = gather_selected_kv(value_states, selected_mask.unsqueeze(0))
+                
+                key_states = torch.cat([key_sink, key_window, key_states], dim=2)
+                value_states = torch.cat([value_sink, value_window, value_states], dim=2)
+                
+                num_blocks_head = num_selected.squeeze(0) + self.sink_size + self.window_size
+                
+                num_blocks_max_heads = num_blocks_head.max().item()
+                
+                # print(num_blocks_max_heads)
+                
+                key_states = key_states[..., :num_blocks_max_heads, :]
+                value_states = value_states[..., :num_blocks_max_heads, :]
+                
+                organized_selected_mask = torch.zeros(num_kv_heads, num_blocks_max_heads, dtype=torch.bool, device=key_states.device)
                 for head_id in range(num_kv_heads):
-                    organized_selected_mask[head_id, : num_blocks_head[head_id]] = 1
+                    organized_selected_mask[head_id, : num_blocks_head[head_id]] = True
                 
-                mask_indptr = torch.arange(0, num_kv_heads + 1).to(unselected_mask.device) * kv_cache_len
+                mask_indptr = torch.arange(0, num_kv_heads + 1).to(unselected_mask_full.device) * num_blocks_max_heads
                 packed_selected_mask, _ = segment_packbits(organized_selected_mask.view(-1), mask_indptr, bitorder="little")
-                
+                # print(packed_selected_mask)
                 packed_selected_mask = packed_selected_mask.view(8, -1)
+                
+                # print(packed_selected_mask.shape)
                 
                 key_states = key_states.transpose(1, 2).squeeze(0).contiguous()
                 value_states = value_states.transpose(1, 2).squeeze(0).contiguous()
@@ -153,5 +238,8 @@ class SnapKV:
             # key_states = torch.cat([k_sink, k_compress, k_cur], dim=2)
             # value_states = torch.cat([v_sink, v_compress, v_cur], dim=2)
             
-            return {"key_states": key_states, "value_states": value_states, "packed_selected_mask": packed_selected_mask, "num_blocks_this_layer": num_blocks_head.max().item()}
-
+            # print(key_states.shape)
+            
+            # return {"key_states": key_states, "value_states": value_states, "packed_selected_mask": packed_selected_mask}
+                        
+            return {"key_states": key_states, "value_states": value_states, "packed_selected_mask": packed_selected_mask, "num_blocks_this_layer": num_blocks_max_heads}
