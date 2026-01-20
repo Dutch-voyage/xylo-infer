@@ -590,8 +590,8 @@ class CacheManager(BaseService):
     def allocate_prefill_page_indices(self, seqs: list[Sequence]):
         self.cu_seqs = seqs
         for seq_id in seqs:
-            self.seq_to_pool_id[seq_id.seq_id] = self.cu_seq_pool_id
             self.cu_seq_pool_id += 1
+            self.seq_to_pool_id[seq_id.seq_id] = self.cu_seq_pool_id
             self.cu_seq_pool_id %= self.max_num_seqs
         
         self.cu_seqs_to_slot_pool_indices = torch.tensor([self.seq_to_pool_id[seq_id.seq_id] for seq_id in seqs], device="cuda", dtype=torch.int32)
@@ -803,11 +803,11 @@ class CacheManager(BaseService):
         for seq in self.cu_seqs:
             slot_mappings = torch.tensor(seq.block_table, device="cuda").to(torch.int32)
             
-            #     cu_sqe_to_pool_id = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
+            # cu_sqe_to_pool_id = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
             
-            #     cu_seq_to_slot_pool = self.seq_to_slot_pool[cu_sqe_to_pool_id, :seq.num_blocks_max_heads]
+            # cu_seq_to_slot_pool = self.seq_to_slot_pool[cu_sqe_to_pool_id, :seq.num_blocks_max_heads]
             
-            #     slot_mappings = cu_seq_to_slot_pool.to(torch.int32).max(dim=0).values // self.num_kv_heads # indices of the first head
+            # slot_mappings = cu_seq_to_slot_pool.to(torch.int32).max(dim=0).values // self.num_kv_heads # indices of the first head
             
             # slot_mappings = self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads, :seq.num_blocks_max_heads].to(torch.int32) // self.num_kv_heads # indices of the first head
             
@@ -851,10 +851,10 @@ class CacheManager(BaseService):
                     packed_selected_mask_full = torch.zeros_like(seq.headwise_mask_layer_transpose[layer_id], device="cuda")
                     
                     packed_selected_mask_full[:, :ret["packed_selected_mask"].shape[-1]] = ret["packed_selected_mask"].clone()
-                    if layer_id == 35:
-                        print(seq.headwise_mask_layer_transpose[layer_id, -1])
-                        print(packed_selected_mask_full[-1])
-                        print("-" * 100)
+                    # if layer_id == 35:
+                    #     print(seq.headwise_mask_layer_transpose[layer_id, -1])
+                    #     print(packed_selected_mask_full[-1])
+                    #     print("-" * 100)
                     seq.headwise_mask_layer_transpose[layer_id] = packed_selected_mask_full
                     # if layer_id == 0:
                     #     print(seq.headwise_mask_layer_transpose[layer_id])
@@ -870,15 +870,15 @@ class CacheManager(BaseService):
                 if "num_blocks_this_layer" not in ret:
                     return 
                 assert ret["num_blocks_this_layer"] == updated_k.shape[0], f"num_blocks_this_layer {ret['num_blocks_this_layer']} vs updated_k {updated_k.shape}"
-                slot_mappings_packed_store = slot_mappings[: ret["num_blocks_this_layer"]]
+                slot_mappings_packed_store = torch.tensor(seq.block_table[:ret["num_blocks_this_layer"]], device="cuda").to(torch.int32)
                 # if ret["num_blocks_this_layer"] < slot_mappings.shape[0]:
                     # print(slot_mappings)
                     # print(slot_mappings_packed_store)
                     # print("-" * 100)
                 
                 store_kvcache(
-                    key=updated_k,
-                    value=updated_v,
+                    key=updated_k.contiguous(),
+                    value=updated_v.contiguous(),
                     k_cache=k_cache.contiguous(),
                     v_cache=v_cache.contiguous(),
                     slot_mapping=slot_mappings_packed_store,
