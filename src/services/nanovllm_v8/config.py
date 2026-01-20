@@ -18,6 +18,7 @@ class Config:
     kvcache_block_size: int = 1
     query_window_size: int = 128
     layer_budget: int = 128 + 1024
+    layer_upper_budget: int = 2048
     lower_bound_budget: int = 128
     num_kvcache_blocks: int = -1
     

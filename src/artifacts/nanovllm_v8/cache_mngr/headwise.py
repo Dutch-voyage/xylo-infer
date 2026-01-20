@@ -483,16 +483,15 @@ class CacheManager(BaseService):
         seq.next_mask = seq.next_mask.to(torch.uint8)
     
     def _rewrite_organize(self, seq: Sequence):       
-        num_blocks_head = seq.num_blocks_head
         cu_num_block_head = uint8_to_bits(seq.headwise_mask_layer_transpose)[:, :seq.num_blocks_max_heads].to(torch.int32).sum(dim=-1).max(0).values
-        num_blocks_head = torch.maximum(num_blocks_head, cu_num_block_head)
-        seq.num_blocks_head = num_blocks_head
+        seq.num_blocks_head = cu_num_block_head
         
         seq.headwise_mask_layer_transpose = seq.headwise_mask_layer_transpose[..., :(seq.num_blocks_max_heads - 1) // 8 + 1].contiguous()
         seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_max_heads % 8)
+        # seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_head % 8)
         seq.next_mask = seq.next_mask.to(torch.uint8)
         self.update_blocks_post_compression(seq, seq.num_blocks_max_heads)
-        
+        return 
     
     def organize(self):
         for seq in self.cu_seqs:
@@ -708,15 +707,7 @@ class CacheManager(BaseService):
     def _read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
         for seq in self.cu_seqs:
             slot_mappings = torch.tensor(seq.block_table, device="cuda").to(torch.int32)
-            
-            # cu_sqe_to_pool_id = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
-            
-            # cu_seq_to_slot_pool = self.seq_to_slot_pool[cu_sqe_to_pool_id, :seq.num_blocks_max_heads]
-            
-            # slot_mappings = cu_seq_to_slot_pool.to(torch.int32).max(dim=0).values // self.num_kv_heads # indices of the first head
-            
-            # slot_mappings = self.seq_to_slot_pool[self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads, :seq.num_blocks_max_heads].to(torch.int32) // self.num_kv_heads # indices of the first head
-            
+                        
             query_slot_mapping = torch.tensor([seq.query_block_id], device="cuda").to(torch.int32)
             
             query = read_q_cache(
@@ -771,6 +762,14 @@ class CacheManager(BaseService):
                     v_cache=v_cache.contiguous(),
                     slot_mapping=slot_mappings_packed_store,
                 )
+                
+                # if layer_id == 15:
+                #     print(slot_mappings.shape)
+                #     print(slot_mappings)
+                #     print(slot_mappings_packed_store.shape)
+                #     print(slot_mappings_packed_store)
+                #     print(packed_selected_mask_full)
+                #     print("-" * 100)
                 
                 # seq_to_slot_pool_indices = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
                 

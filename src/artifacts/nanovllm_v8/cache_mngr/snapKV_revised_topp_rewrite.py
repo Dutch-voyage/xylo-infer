@@ -15,12 +15,14 @@ class SnapKV:
         self,
         config, 
         budget=128,
+        upper_budget=2048, 
         window_size=8,
         kernel_size=7,
         record_kept_token_indices=False,
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
         self.budget = budget
+        self.upper_budget = upper_budget
         self.sink_size = 1
         self.window_size = window_size - self.sink_size
         self.window_size = 32
@@ -146,38 +148,31 @@ class SnapKV:
                     value_states[:, :, self.sink_size : -self.window_size, :],
                 )
             else:
-                unselected_mask_full = torch.zeros(num_kv_heads, q_cache_len, kv_cache_len, dtype=torch.bool, device=key_states.device)
-                
                 attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=self.p_attn)
                                 
-                unselected_mask = (attn_topp_normed == torch.zeros_like(attn_topp_normed))
+                unselected_mask_topp = (attn_topp_normed == torch.zeros_like(attn_topp_normed))
                 
-                unselected_mask = unselected_mask.reshape(num_kv_heads, q_cache_len, -1)
+                unselected_mask_topp = unselected_mask_topp.reshape(num_kv_heads, q_cache_len, -1)
                 
-                unselected_mask_full = unselected_mask
+                selected_mask_topp = (1 - torch.prod(unselected_mask_topp, dim=-2)) * 2
                 
-                k = min(self.budget - self.sink_size - self.window_size, attn_cache.shape[-1])
+                k = min(self.upper_budget - self.sink_size - self.window_size, attn_cache.shape[-1])
                 
+                unselected_mask_topk = torch.ones(num_kv_heads, q_cache_len, kv_cache_len, dtype=torch.int32, device=key_states.device)
                 # # save the top budget indices
                 indices_desc_topk = attn_cache.squeeze(0).topk(k, dim=-1).indices
-                unselected_mask_full.scatter_(-1, indices_desc_topk, False)
+                unselected_mask_topk.scatter_(-1, indices_desc_topk, 0)
                 
-                selected_mask = ~(torch.prod(unselected_mask_full.to(torch.int32), dim=-2).to(torch.bool))
-                # if kwargs["layer_id"] == 0:
-                #     print(selected_mask[0])
-
-                # if kwargs["layer_id"] == 35:
-                #     print(selected_mask)
+                selected_mask_topk = (1 - torch.prod(unselected_mask_topk)) 
                 
                 # selected_mask = torch.ones(num_kv_heads, kv_cache_len, dtype=torch.bool, device=key_states.device)
                 
-                selected_mask[..., :self.sink_size] = False
+                selected_mask = selected_mask_topk + selected_mask_topp
                 
-                selected_mask.scatter_(-1, window_indices, False)
+                selected_mask[..., :self.sink_size] = 0
                 
-                # print(selected_mask_full)
-                
-                # selected_mask.masked_fill_((~effective_mask).squeeze(0).squeeze(1), False)
+                selected_mask.scatter_(-1, window_indices, 0)
+                selected_mask.masked_fill_((~effective_mask).squeeze(0).squeeze(1), 0)
 
                 # if kwargs["layer_id"] == 0:
                 #     print(window_indices)
@@ -206,6 +201,8 @@ class SnapKV:
                 
                 num_blocks_head = num_selected.squeeze(0) + self.sink_size + self.window_size
                 
+                num_blocks_head = torch.minimum(num_blocks_head, torch.ones_like(num_blocks_head) * self.upper_budget)
+                
                 num_blocks_max_heads = num_blocks_head.max().item()
                 
                 # print(num_blocks_max_heads)
@@ -217,7 +214,7 @@ class SnapKV:
                 for head_id in range(num_kv_heads):
                     organized_selected_mask[head_id, : num_blocks_head[head_id]] = True
                 
-                mask_indptr = torch.arange(0, num_kv_heads + 1).to(unselected_mask_full.device) * num_blocks_max_heads
+                mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * num_blocks_max_heads
                 packed_selected_mask, _ = segment_packbits(organized_selected_mask.view(-1), mask_indptr, bitorder="little")
                 # print(packed_selected_mask)
                 packed_selected_mask = packed_selected_mask.view(8, -1)

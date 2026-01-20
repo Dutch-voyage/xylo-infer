@@ -19,7 +19,7 @@ def gather_selected_kv(kv_cache, indicator):
 
     # 1. Calculate the target length (max selections across the batch/heads)
     #    We assume the user wants the tensor padded to the longest selection in the batch.
-    num_selected = indicator.sum(dim=-1)  # [bsz, num_kv_heads]
+    num_selected = indicator.to(torch.bool).sum(dim=-1)  # [bsz, num_kv_heads]
     max_selected_len = num_selected.max().item()
     
     # Optional: If nothing is selected, return empty tensor
@@ -30,7 +30,7 @@ def gather_selected_kv(kv_cache, indicator):
     # 2. Get gather indices using Stable Sort
     #    descending=True puts 1s (True) before 0s (False).
     #    stable=True ensures selected tokens remain in their original relative order (time order).
-    sorted_indices = torch.argsort(indicator.int(), dim=-1, descending=True, stable=True)
+    sorted_indices = torch.argsort(indicator, dim=-1, descending=True, stable=True)
     
     #    Truncate to the max length needed
     gather_indices = sorted_indices[..., :max_selected_len] # [bsz, num_kv_heads, max_selected]
