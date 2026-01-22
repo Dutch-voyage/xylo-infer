@@ -13,6 +13,7 @@ from .layers.sampler import Sampler
 from ..utils.context import set_context, get_context, reset_context
 from ..utils.loader import load_model
 from ..utils.logging import get_log, reset_log
+from ..utils.socket import is_port_in_use
 
 from src.core.service_base import BaseService
 import itertools
@@ -60,8 +61,12 @@ class ModelRunner(BaseService):
         
         # self.cu_seqs: list[Sequence] = []
 
+        port_num = 3444
+        while is_port_in_use(port_num):
+            port_num += 1
+        
         dist.init_process_group(
-            "nccl", "tcp://localhost:3444", world_size=self.world_size, rank=rank
+            "nccl", f"tcp://localhost:{port_num}", world_size=self.world_size, rank=rank
         )
         torch.cuda.set_device(rank)
         self.device = torch.device("cuda", rank)

@@ -1,14 +1,10 @@
-for layer_budget in 4096; do
+for layer_budget in 1024 2048 4096; do
   for window_size in 32; do
     for steps_between_cache_compressions in 128; do
 
-      python -m eval.test_aime_evict \
-          --compress_method rkv \
-          --layer_budget ${layer_budget} \
-          --window_size ${window_size} \
-          --steps_between_cache_compressions ${steps_between_cache_compressions}
-
-      python -m eval.test_aime_evict \
+      python -m eval.test_aime_baseline \
+          --data_source aime25 \
+          --enforce_eager True \
           --compress_method snapkv \
           --layer_budget ${layer_budget} \
           --window_size ${window_size} \
