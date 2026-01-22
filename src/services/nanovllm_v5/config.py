@@ -27,6 +27,7 @@ class Config:
     return_logits:  bool = False
     p_attn: float = 0.99
 
+    if_fake_compress: bool = False
     steps_between_cache_compressions: int = 128
 
     def __post_init__(self):
