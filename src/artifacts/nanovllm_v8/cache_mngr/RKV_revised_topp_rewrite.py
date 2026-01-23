@@ -40,6 +40,12 @@ class RKV:
         self.p_attn = config.p_attn
         self.if_log_compress = config.if_log_compress
         
+        self.num_kv_heads = config.hf_config.num_key_value_heads
+        
+        self.mask_indptr = torch.arange(0, self.num_kv_heads + 1).to("cuda")
+        self.block_indices = torch.arange(0, config.max_model_len).to("cuda")
+        
+        
         self.temperatures = {}
         
     def update_kv(
@@ -80,17 +86,7 @@ class RKV:
                 
                 indices = torch.arange(kv_cache_len, device=key_states.device).unsqueeze(0).expand(bsz, -1)
     
-                # 2. Mark invalid positions with -1 so they are not selected.
-                # We use -1 because we will look for the largest indices (the "last" ones).
-                # valid indices are >= 0, so -1 will always be smaller/filtered out by topk.
                 masked_indices = indices.masked_fill(~effective_mask, -1)
-                
-                # 3. Find the indices of the last 'window_len' valid tokens.
-                # topk gives us the largest values (i.e., the indices of the latest tokens).
-                # Note: If a batch has fewer than window_len valid tokens, this will pick -1s.
-                # You may need to handle that edge case depending on your padding strategy.
-                
-                # _, window_indices = torch.topk(masked_indices, k=256, dim=-1)
                 _, window_indices = torch.topk(masked_indices, k=self.window_size, dim=-1)
                 
                 window_indices = window_indices.squeeze(0).squeeze(1)
@@ -231,18 +227,16 @@ class RKV:
                 
                 num_blocks_head = torch.minimum(num_blocks_head, torch.ones_like(num_blocks_head) * self.upper_budget)
                 
-                num_blocks_max_heads = num_blocks_head.max().item()
-                
-                # print(num_blocks_max_heads)
+                num_blocks_max_heads = num_blocks_head.max()
                 
                 key_states = key_states[..., :num_blocks_max_heads, :]
                 value_states = value_states[..., :num_blocks_max_heads, :]
                 
-                organized_selected_mask = torch.zeros(num_kv_heads, num_blocks_max_heads, dtype=torch.bool, device=key_states.device)
-                for head_id in range(num_kv_heads):
-                    organized_selected_mask[head_id, : num_blocks_head[head_id]] = True
+                max_blocks = selected_mask.shape[-1]
+                block_indices = self.block_indices[:max_blocks].to(selected_mask.device)
+                organized_selected_mask = block_indices.unsqueeze(0) < num_blocks_head.unsqueeze(1)
                 
-                mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * num_blocks_max_heads
+                mask_indptr = self.mask_indptr * num_blocks_max_heads
                 packed_selected_mask, _ = segment_packbits(organized_selected_mask.view(-1), mask_indptr, bitorder="little")
                 # print(packed_selected_mask)
                 packed_selected_mask = packed_selected_mask.view(8, -1)
