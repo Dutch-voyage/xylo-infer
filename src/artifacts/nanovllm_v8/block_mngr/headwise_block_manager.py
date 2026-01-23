@@ -71,7 +71,7 @@ class BlockManager(BaseService):
             seq.block_id_to_count[block_id] = 0
             if i % 8 == 0 and i != 0:
                 seq.headwise_mask_layer_transpose = torch.cat(
-                    [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
+                    [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cuda", dtype=torch.uint8)], dim=2
                 )
             seq.headwise_mask_layer_transpose[:, :, i // 8] += seq.next_mask
             seq.next_mask = torch_rotl_uint8(seq.next_mask, 1)
@@ -96,7 +96,7 @@ class BlockManager(BaseService):
         # there must be at least one token after prefilling (allocate)
         if (seq.num_blocks_max_heads - 1) // 8 >= seq.headwise_mask_layer_transpose.shape[2]:
             seq.headwise_mask_layer_transpose = torch.cat(
-                [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cpu", dtype=torch.uint8)], dim=2
+                [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cuda", dtype=torch.uint8)], dim=2
             )
         # print(seq.headwise_mask_layer_transpose[0])
         # seq.headwise_mask_layer_transpose[:, torch.arange(0, self.num_kv_heads), (seq.num_blocks_head - 1) // 8] += seq.next_mask

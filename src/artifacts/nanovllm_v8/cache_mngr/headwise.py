@@ -483,11 +483,11 @@ class CacheManager(BaseService):
         seq.next_mask = seq.next_mask.to(torch.uint8)
     
     def _rewrite_organize(self, seq: Sequence):       
-        cu_num_block_head = uint8_to_bits(seq.headwise_mask_layer_transpose)[:, :seq.num_blocks_max_heads].to(torch.int32).sum(dim=-1).max(0).values
+        cu_num_block_head = uint8_to_bits(seq.headwise_mask_layer_transpose.to("cuda"))[:, :seq.num_blocks_max_heads].to(torch.int32).sum(dim=-1).max(0).values
         seq.num_blocks_head = cu_num_block_head
         
         seq.headwise_mask_layer_transpose = seq.headwise_mask_layer_transpose[..., :(seq.num_blocks_max_heads - 1) // 8 + 1].contiguous()
-        seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_max_heads % 8)
+        seq.next_mask = ((torch.ones((self.num_kv_heads,), device="cuda", dtype=torch.uint8)) << (seq.num_blocks_max_heads % 8))
         # seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_head % 8)
         seq.next_mask = seq.next_mask.to(torch.uint8)
         self.update_blocks_post_compression(seq, seq.num_blocks_max_heads)
@@ -531,7 +531,7 @@ class CacheManager(BaseService):
         ) 
             
     def update_masks_optimized(self, seqs): 
-        self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.view(self.num_layers, -1).to(device="cuda", dtype=torch.uint8) for seq in seqs], dim=-1)
+        self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.to(device="cuda", dtype=torch.uint8).view(self.num_layers, -1) for seq in seqs], dim=-1)
         
         context = get_context()
         context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
@@ -732,7 +732,7 @@ class CacheManager(BaseService):
                 value.transpose(1, 2),
                 # seq.num_blocks_head,
                 # effective_mask=uint8_to_bits(seq.headwise_mask_layer_transpose[layer_id]).view(self.num_kv_heads, -1)[:, :seq.num_blocks_max_heads].to(torch.bool), 
-                effective_mask=uint8_to_bits(seq.headwise_mask_layer_transpose[layer_id]).view(self.num_kv_heads, -1)[:, :len(seq.block_table)].to(torch.bool), 
+                effective_mask=uint8_to_bits(seq.headwise_mask_layer_transpose[layer_id]).to("cuda").view(self.num_kv_heads, -1)[:, :len(seq.block_table)].to(torch.bool), 
                 seq_id=seq.seq_id,
                 layer_id=layer_id,
             )
@@ -762,15 +762,6 @@ class CacheManager(BaseService):
                     v_cache=v_cache.contiguous(),
                     slot_mapping=slot_mappings_packed_store,
                 )
-                
-                # if layer_id == 15:
-                #     print(slot_mappings.shape)
-                #     print(slot_mappings)
-                #     print(slot_mappings_packed_store.shape)
-                #     print(slot_mappings_packed_store)
-                #     print(packed_selected_mask_full)
-                #     print("-" * 100)
-                
                 # seq_to_slot_pool_indices = self.seq_to_pool_id[seq.seq_id] * self.num_kv_heads + self.head_indices
                 
                 # self.seq_to_slot_pool[seq_to_slot_pool_indices, :ret["num_blocks_this_layer"]] = slot_mappings_packed_store[None, :] * self.num_kv_heads + self.head_indices[:, None]

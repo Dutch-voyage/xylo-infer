@@ -66,7 +66,6 @@ class CacheManager(BaseService):
                 self.cu_seqs
             )
 
-
     def update_indices_capture(self, bs: int):
         self.init_forward_metadata_capture_cuda_graph(
             bs,

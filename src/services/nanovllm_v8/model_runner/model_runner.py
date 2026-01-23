@@ -67,6 +67,8 @@ class ModelRunner(BaseService):
         self.rank = rank
         self.event = event
         
+        self.trace_count = 0
+        
         port_num = 3444
         while is_port_in_use(port_num):
             port_num += 1
@@ -254,6 +256,10 @@ class ModelRunner(BaseService):
 
     # @torch.inference_mode()
     def compress(self):
+        # from torch.profiler import profile, ProfilerActivity, record_function
+        # activities = [ProfilerActivity.CPU]
+        # with profile(activities=activities, record_shapes=True) as prof:
+        #     with record_function("compress"):
         for module in self.model.modules():
             if (
                 hasattr(module, "k_cache")
@@ -273,6 +279,9 @@ class ModelRunner(BaseService):
                     module.q_cache, module.k_cache, module.v_cache, module.layer_id
                 )
         self.cache_mngr.organize()
+        
+        # self.trace_count += 1
+        # prof.export_chrome_trace(f"cpu_trace_{self.trace_count}.json")
 
     def save_compress_distribution(self, steps):
         save_path = os.path.join(self.config.log_path, f"compress_distribution_{steps}.pt")
