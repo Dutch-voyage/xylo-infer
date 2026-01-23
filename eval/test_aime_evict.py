@@ -67,7 +67,7 @@ def generate_answer(
     )
     dataset = Dataset_with_template(local_dir, data_source, tokenizer)
 
-    batch_size = 30
+    batch_size = 50
     dataloader = DataLoader(dataset, batch_size=batch_size)
 
     total_scores = 0.0
@@ -144,7 +144,7 @@ def generate_answer(
         f"Average generated tokens: {total_generate_lengths / (len(dataset))}" + "\n\n"
     )
     with open(
-        f"aime_{compress_method}_{layer_budget}_{layer_upper_budget}_{window_size}_{steps_between_cache_compressions}",
+        f"{data_source}_{compress_method}_{layer_budget}_{layer_upper_budget}_{window_size}_{steps_between_cache_compressions}",
         "a",
     ) as f:
         f.write(summary)
