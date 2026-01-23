@@ -29,7 +29,8 @@ class Dataset_with_template(Dataset):
         raw_prompt = self.tokenizer.apply_chat_template(
             prompt, add_generation_prompt=True, tokenize=False
         )
-
+        # Filter out image-related columns that contain None
+        row_dict = {k: v for k, v in row_dict.items() if k not in ["image", "has_image"]}
         row_dict["raw_prompt"] = raw_prompt
         return row_dict
 
@@ -38,10 +39,10 @@ class Dataset_with_template(Dataset):
 
 
 def generate_answer(
-    local_dir="datasets",
+    local_dir="./datasets",
     model_path="/home/yyx/models/Qwen3-4B",
-    data_source="aime24",
-    enforce_eager=False,
+    data_source="umathtop50",
+    enforce_eager=True,
     compress_method="rkv",
     layer_budget=1024,
     layer_upper_budget=2048, 
@@ -67,11 +68,11 @@ def generate_answer(
     sampling_params = SamplingParams(
         temperature=0.6, top_k=20, top_p=0.95, max_tokens=32768
     )
-    dataset = Dataset_with_template(local_dir, data_source, tokenizer)
-
-    batch_size = 30
-    dataloader = DataLoader(dataset, batch_size=batch_size)
-
+    
+    dataset = Dataset_with_template(local_dir, data_source, tokenizer)    
+    batch_size = 50
+    dataloader = DataLoader(dataset, batch_size=batch_size)    
+    
     total_scores = 0.0
     total_generate_lengths = 0
     evaluate_result = {}
