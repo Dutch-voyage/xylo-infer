@@ -28,13 +28,13 @@ class Dataset_with_template(Dataset):
         raw_prompt = self.tokenizer.apply_chat_template(
             prompt, add_generation_prompt=True, tokenize=False
         )
-
+        # Filter out image-related columns that contain None
+        row_dict = {k: v for k, v in row_dict.items() if k not in ["image", "has_image"]}
         row_dict["raw_prompt"] = raw_prompt
         return row_dict
 
     def __len__(self):
         return len(self.dataframe)
-
 
 def generate_answer(
     local_dir="datasets",
