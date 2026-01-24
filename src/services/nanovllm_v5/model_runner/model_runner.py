@@ -24,6 +24,7 @@ from src.services.nanovllm_v5.utils.context import set_cuda_graph_flag
 from src.artifacts.nanovllm_v5.cache_mngr.layerwise import CacheManager
 
 from src.artifacts.nanovllm_v5.cache_mngr.snapKV import SnapKV
+from src.artifacts.nanovllm_v5.cache_mngr.vanilla import VanillaKV
 # from src.artifacts.nanovllm_v5.cache_mngr.snapKV_topp import SnapKV
 from src.artifacts.nanovllm_v5.cache_mngr.RKV import RKV
 from src.artifacts.nanovllm_v5.cache_mngr.oMerging import OrthMerging
@@ -85,6 +86,8 @@ class ModelRunner(BaseService):
             self.compressor = RKV(window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "snapkv":
             self.compressor = SnapKV(window_size=config.query_window_size, budget=config.layer_budget, p_attn=self.p_attn)
+        elif self.config.compress_method == "vanilla":
+            self.compressor = VanillaKV(window_size=config.query_window_size, budget=config.layer_budget, p_attn=self.p_attn)
         elif self.config.compress_method == "oMerge_filter":
             self.compressor = OrthMergingFilter(
                 window_size=config.query_window_size,
