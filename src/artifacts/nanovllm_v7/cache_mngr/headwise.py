@@ -711,7 +711,8 @@ class CacheManager(BaseService):
         )
     
     def read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
-        return self._packed_read_and_store_cache(q_cache, k_cache, v_cache, layer_id)
+        # return self._packed_read_and_store_cache(q_cache, k_cache, v_cache, layer_id)
+        return self._read_and_store_cache(q_cache, k_cache, v_cache, layer_id)
     
     def _read_and_store_cache(self, q_cache, k_cache, v_cache, layer_id):
         """
@@ -748,7 +749,7 @@ class CacheManager(BaseService):
         
         key = key.unsqueeze(0)
         value = value.unsqueeze(0)
-
+        
         ret = self.compressor.update_kv(
             query.transpose(1, 2),
             key.transpose(1, 2),
@@ -775,3 +776,5 @@ class CacheManager(BaseService):
             v_cache=v_cache,
             slot_mapping=slot_mappings_tensor,
         )
+        
+        self.update_blocks_post_compression(self.cu_seqs[0], self.layer_budget)

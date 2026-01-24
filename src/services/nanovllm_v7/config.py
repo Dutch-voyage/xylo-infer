@@ -22,10 +22,12 @@ class Config:
     
     compress_method: str = "oMerge"
     
+    
     if_compress_kvcache: bool = False
     if_fake_compress: bool = False
     if_log_compress: bool = False
     if_log_lse_in_attn: bool = False
+    if_temperatured: bool = False
     if_log_num_topp: bool = False
     lse_preserve_merge: bool = False # merge only take effect when "steps between_cache_compressions" > "query_window_size"
     

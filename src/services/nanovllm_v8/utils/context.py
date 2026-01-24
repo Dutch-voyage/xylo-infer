@@ -32,8 +32,13 @@ class Context:
 
 _CONTEXT = Context()
 
+def init_packed_wise_mask_for_cudagraph(num_layers, max_num_seqs, max_context_len):
+    packed_headwise_mask = torch.zeros((num_layers, max_num_seqs * max_context_len), device="cuda", dtype=torch.uint8)
+    global _CONTEXT
+    _CONTEXT.packed_headwise_mask = packed_headwise_mask
 
 def get_context():
+    global _CONTEXT
     return _CONTEXT
 
 def set_context_replace(context):
@@ -58,18 +63,17 @@ def set_context(
     else:
         no_prefix = None
 
-    _CONTEXT = Context(
-        is_prefill=is_prefill,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        slot_mapping=slot_mapping,
-        context_lens=context_lens,
-        query_slot_mapping=query_slot_mapping,
-        query_window_pos=query_window_pos,
-        no_prefix=no_prefix,
-    )
+    _CONTEXT.is_prefill = is_prefill
+    _CONTEXT.cu_seqlens_q = cu_seqlens_q
+    _CONTEXT.cu_seqlens_k = cu_seqlens_k
+    _CONTEXT.max_seqlen_q = max_seqlen_q
+    _CONTEXT.max_seqlen_k = max_seqlen_k
+    _CONTEXT.slot_mapping = slot_mapping
+    _CONTEXT.context_lens = context_lens
+    _CONTEXT.query_slot_mapping = query_slot_mapping
+    _CONTEXT.query_window_pos = query_window_pos
+    _CONTEXT.no_prefix = no_prefix
+
 
 
 def reset_context():

@@ -396,7 +396,11 @@ class CacheManager(BaseService):
         
         self.seq_to_pool_id = {} 
 
-        self.seq_to_slot_pool = torch.zeros((config.max_num_seqs * self.num_kv_heads, config.max_model_len), dtype=torch.int32, device="cuda")
+        self.max_num_seqs = config.max_num_seqs
+        
+        self.max_context_len = config.max_model_len
+
+        self.seq_to_slot_pool = torch.zeros((self.max_num_seqs * self.num_kv_heads, self.max_context_len), dtype=torch.int32, device="cuda")
         
         self.head_indices = torch.arange(0, self.num_kv_heads, dtype=torch.int32, device="cuda")
         
@@ -408,6 +412,12 @@ class CacheManager(BaseService):
         
         self.if_fake_compress = config.if_fake_compress
         
+        self.mask_arr = {layer_id: [] for layer_id in range(self.num_layers)}
+        self.mask_indptr = {layer_id: None for layer_id in range(self.num_layers)}
+        self.cu_packed_custom_mask = {layer_id: None for layer_id in range(self.num_layers)}
+    
+    def reset(self):
+        self.seq_to_slot_pool = torch.zeros((self.max_num_seqs * self.num_kv_heads, self.max_context_len), dtype=torch.int32, device="cuda")
         self.mask_arr = {layer_id: [] for layer_id in range(self.num_layers)}
         self.mask_indptr = {layer_id: None for layer_id in range(self.num_layers)}
         self.cu_packed_custom_mask = {layer_id: None for layer_id in range(self.num_layers)}
@@ -503,8 +513,8 @@ class CacheManager(BaseService):
     def allocate_prefill_page_indices(self, seqs: list[Sequence]):
         self.cu_seqs = seqs
         for seq_id in seqs:
-            self.cu_seq_pool_id += 1
             self.seq_to_pool_id[seq_id.seq_id] = self.cu_seq_pool_id
+            self.cu_seq_pool_id += 1
             self.cu_seq_pool_id %= self.max_num_seqs
         
         self.cu_seqs_to_slot_pool_indices = torch.tensor([self.seq_to_pool_id[seq_id.seq_id] for seq_id in seqs], device="cuda", dtype=torch.int32)
@@ -535,7 +545,7 @@ class CacheManager(BaseService):
         
         context = get_context()
         context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
-        set_context_replace(context)
+        # set_context_replace(context)
         
     def allocate_decode_page_indices(self, seqs: list[Sequence]):
         # sglang says when using overlap mode, should not in-place operation, need to investigate, here is non-overlap mode 
@@ -625,22 +635,29 @@ class CacheManager(BaseService):
                 self.len_seqs,
                 self.seq_to_slot_pool.stride(0)
             ) 
+            
         else:
             self.cu_seqs_to_slot_pool_indices = torch.tensor([self.seq_to_pool_id[seq.seq_id] for seq in seqs], device="cuda", dtype=torch.int32)
-            
+
             cu_slot_mapping_headwise = ((cu_slot_mapping * self.num_kv_heads)[:, None] + self.head_indices[None, :])
             
             seq_to_pool_indices_headwise = (self.cu_seqs_to_slot_pool_indices[:, None] * self.num_kv_heads) + self.head_indices[None, :]
             
             seq_lens_headwise = torch.cat([seq.num_blocks_head.unsqueeze(0) for seq in seqs]) - 1
             
-            seq_lens_headwise = torch.maximum(seq_lens_headwise, torch.zeros_like(seq_lens_headwise))
+            # seq_lens_headwise = torch.maximum(seq_lens_headwise, torch.zeros_like(seq_lens_headwise))
             
             self.seq_to_slot_pool[seq_to_pool_indices_headwise, seq_lens_headwise] = cu_slot_mapping_headwise
         
+            # print(self.cu_seqs[0].block_table)
+            # print(self.seq_to_slot_pool[: self.num_kv_heads, :self.cu_seqs[0].num_blocks_max_heads])
+            # print('-' * 100)
+
             headwise_seq_pool_id = torch.tensor([self.seq_to_pool_id[seq.seq_id] for seq in seqs], device="cuda", dtype=torch.int32)[:, None] * self.num_kv_heads + self.head_indices[None, :]
             
             headwise_seq_lens = torch.cat([seq.num_blocks_head for seq in seqs]).to("cuda")
+            
+            # print(headwise_seq_lens)
             
             self.cu_kv_page_indices = read_req_to_token_pool_headwise(
                 self.seq_to_slot_pool,
@@ -649,6 +666,10 @@ class CacheManager(BaseService):
                 len(seqs) * self.num_kv_heads,
                 self.seq_to_slot_pool.stride(0)
             )
+            
+            # print(self.cu_kv_page_indices)
+            # print("-" * 100)
+            
             self.cu_kv_indptr = torch.cumsum(
                 torch.cat([torch.tensor([0], device="cuda"), headwise_seq_lens], dim=0),
                 dim=0, dtype=torch.int32
@@ -662,9 +683,13 @@ class CacheManager(BaseService):
             
             self.cu_packed_custom_mask_optimized = torch.cat([seq.headwise_mask_layer_transpose.reshape(self.num_layers, -1).to(device="cuda", dtype=torch.uint8) for seq in seqs], dim=-1)
             
+            # print(self.cu_packed_custom_mask_optimized.shape)
+            # print("-" * 100)
+            
             context = get_context()
-            context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
-            set_context_replace(context)
+            # print(context.packed_headwise_mask.shape)
+            context.packed_headwise_mask[:, :self.cu_packed_custom_mask_optimized.shape[1]].copy_(self.cu_packed_custom_mask_optimized)
+            # set_context_replace(context)
             
             self.log_occupied_pages(self.cu_kv_page_indices.shape[0])
 

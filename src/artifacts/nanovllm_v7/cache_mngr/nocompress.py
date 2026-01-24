@@ -28,9 +28,9 @@ class NoCompress:
         value_states,
         *args, 
     ):
-        head_dim = query_states.shape[-1]
-        q_cache_len = query_states.shape[-2]    
+        bsz, num_heads, q_cache_len, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
+        num_kv_heads = key_states.shape[1]
 
         if kv_cache_len < self.budget:
             return {

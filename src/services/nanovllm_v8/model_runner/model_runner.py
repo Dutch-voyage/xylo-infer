@@ -18,7 +18,7 @@ from src.core.service_base import BaseService
 import itertools
 from ..engine.io_struct import SamplingInfo, ModelRunnerOutput
 
-from src.services.nanovllm_v8.utils.context import set_cuda_graph_flag
+from src.services.nanovllm_v8.utils.context import set_cuda_graph_flag, init_packed_wise_mask_for_cudagraph
 
 from src.artifacts.nanovllm_v8.cache_mngr.headwise import CacheManager
 
@@ -31,7 +31,7 @@ from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised_topp_rewrite import Sna
 # from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_v2 import RKV
 from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_topp_rewrite import RKV
 
-from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp_revised import VanillaToppKV
+from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp_rewrite import VanillaToppKV
 
 from src.artifacts.nanovllm_v8.cache_mngr.oMerging import OrthMerging
 from src.artifacts.nanovllm_v8.cache_mngr.oMerging_filter import OrthMerging as OrthMergingFilter
@@ -139,11 +139,19 @@ class ModelRunner(BaseService):
         self.allocate_kv_cache()
         if not self.enforce_eager:
             set_cuda_graph_flag()
+            init_packed_wise_mask_for_cudagraph(
+                hf_config.num_hidden_layers, 
+                config.max_num_seqs, 
+                config.max_model_len
+            )
             self.capture_cudagraph()
+            print("cuda graph captured")
+            self.cache_mngr.reset()
+            
         reset_log()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
-        print("cuda graph captured")
+        
         if self.world_size > 1:
             if rank == 0:
                 self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
@@ -562,7 +570,7 @@ class ModelRunner(BaseService):
         token_ids = (
             self.sampler(logits, sampling_infos).tolist() if self.rank == 0 else None
         )
-        reset_context()
+        
         # return ModelRunnerOutput(token_ids=token_ids, logits=logits)
         return ModelRunnerOutput(token_ids=token_ids, logits=None)
 
@@ -611,6 +619,11 @@ class ModelRunner(BaseService):
             self.graphs[bs] = graph
             torch.cuda.synchronize()
             reset_context()
+            init_packed_wise_mask_for_cudagraph(
+                hf_config.num_hidden_layers,
+                config.max_num_seqs,
+                config.max_model_len,
+            )
 
         self.graph_vars = dict(
             input_ids=input_ids,

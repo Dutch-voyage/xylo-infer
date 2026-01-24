@@ -219,7 +219,7 @@ class Attention(nn.Module, Artifact):
         
         # packed_custom_mask_buf when cudagraph is enabled
         self.custom_mask_buf = torch.zeros(
-            (model_runner.config.hf_config.max_position_embeddings * max_bs,), dtype=torch.uint8, device=model_runner.device
+            (model_runner.config.max_model_len * max_bs * num_kv_heads // 8,), dtype=torch.uint8, device=model_runner.device
         )
                 
         self.mask_indptr_buf = torch.zeros(
@@ -227,7 +227,7 @@ class Attention(nn.Module, Artifact):
         )
         
         self.cuda_graph_kv_indices = torch.zeros(
-            model_runner.config.hf_config.max_position_embeddings * max_bs * num_kv_heads, 
+            model_runner.config.max_model_len * max_bs * num_kv_heads, 
             dtype=torch.int32,
             device=model_runner.device
         ) 
@@ -325,7 +325,8 @@ class Attention(nn.Module, Artifact):
     def _partial_update_indices_cudagraph(self,
                                           cu_packed_custom_mask: torch.Tensor,
                                           ):
-        self.forward_wrapper._custom_mask_buf[:len(cu_packed_custom_mask)].copy_(cu_packed_custom_mask)
+        self.forward_wrapper._custom_mask_buf.copy_(cu_packed_custom_mask)
+        # self.forward_wrapper._custom_mask_buf[:len(cu_packed_custom_mask)].copy_(cu_packed_custom_mask)
     
     def _partial_update_indices(self, 
                                 cu_packed_custom_mask: torch.Tensor,
@@ -351,8 +352,8 @@ class Attention(nn.Module, Artifact):
         kv_indices_buf = decode_wrapper._paged_kv_indices_buf
         kv_indices_buf[: cu_page_indices.shape[0]] = cu_page_indices
         
-        # packed_custom_mask_buf = decode_wrapper._custom_mask_buf
-        # packed_custom_mask_buf[: cu_packed_custom_mask.shape[0]] = cu_packed_custom_mask
+        packed_custom_mask_buf = decode_wrapper._custom_mask_buf
+        packed_custom_mask_buf[: cu_packed_custom_mask.shape[0]] = cu_packed_custom_mask
         
         decode_wrapper.plan(
             qo_indptr=self.qo_indptr[:bs * self.num_kv_heads + 1], 
@@ -430,8 +431,8 @@ class Attention(nn.Module, Artifact):
         k_cache, v_cache = self.k_cache.contiguous(), self.v_cache.contiguous()
 
         if k_cache.numel() and v_cache.numel():
-            # store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-            store_kvcache(k, v, self.k_cache, self.v_cache, context.slot_mapping)
+            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+            # store_kvcache(k, v, self.k_cache, self.v_cache, context.slot_mapping)
             
         if context.is_prefill:
             store_q_cache(q, self.q_cache, context.query_slot_mapping, context.query_window_pos, is_prefill=True)
@@ -455,8 +456,8 @@ class Attention(nn.Module, Artifact):
             self.partial_update_indices(context.packed_headwise_mask[layer_id])
             store_q_cache(q, self.q_cache, context.query_slot_mapping, is_prefill=False)
             q = q.view(-1, self.num_kv_heads, self.num_heads // self.num_kv_heads, self.head_dim).view(-1, self.num_heads // self.num_kv_heads, self.head_dim)
-            k_cache = self.k_cache.view(-1, 1, self.head_dim)
-            v_cache = self.v_cache.view(-1, 1, self.head_dim)
+            k_cache = k_cache.view(-1, 1, self.head_dim)
+            v_cache = v_cache.view(-1, 1, self.head_dim)
             
             if self.if_log_lse:
                 o, lse = self.forward_wrapper.forward_return_lse(

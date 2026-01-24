@@ -18,13 +18,14 @@ class SnapKV:
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
         self.budget = budget
-        self.sink_size = 1
+        self.sink_size = 0
         self.window_size = window_size - self.sink_size
         self.kernel_size = kernel_size
 
         self.lse_preserve_merge = config.lse_preserve_merge
         self.if_log_compress = config.if_log_compress
         self.p_attn = config.p_attn
+        self.if_temperatured = config.if_temperatured
         
         # for recording kept token indices
         self.record_kept_token_indices = record_kept_token_indices
@@ -36,9 +37,10 @@ class SnapKV:
         value_states,
         *args, 
     ):
-        bsz, q_cache_len, num_heads, head_dim = query_states.shape
+        bsz, num_heads, q_cache_len, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
-
+        num_kv_heads = key_states.shape[1]
+        
         if kv_cache_len < self.budget:
             return {
                 "key_states": key_states, 
@@ -47,7 +49,7 @@ class SnapKV:
         else:
             attn_weights = compute_attention_scores(query_states, key_states)
 
-            raw_attn_weights = attn_weights[:, :, :, self.sink_size : -self.window_size]# .view(-1, kv_cache_len - self.window_size)
+            raw_attn_weights = attn_weights[:, :, :, self.sink_size : -self.window_size] # .view(-1, kv_cache_len - self.window_size)
             
             def transform(attn_weights):
                 transformed_attn = F.max_pool1d(
@@ -58,8 +60,14 @@ class SnapKV:
                 )
                 return transformed_attn
 
-            # attn_weights, T = binary_search_T(raw_attn_weights, self.p_attn, transform)
-            attn_weights, T = gradient_descent_T(raw_attn_weights, self.p_attn, transform)
+            if self.if_temperatured:
+                # attn_weights, T = binary_search_T(raw_attn_weights, self.p_attn, transform)
+                attn_weights, T = gradient_descent_T(raw_attn_weights, self.p_attn, transform)
+            else:
+                raw_attn_weights = raw_attn_weights.view(-1, kv_cache_len - self.window_size - self.sink_size)
+                attn_weights = transform(raw_attn_weights)
+                attn_weights = attn_weights.view(bsz, num_kv_heads, q_cache_len, -1)
+                T = None
             
             attn_cache = (
                 nn.functional.softmax(
@@ -70,7 +78,7 @@ class SnapKV:
                 .mean(dim=-2)
                 .to(query_states.dtype)
             ) 
-            
+                        
             if self.if_log_compress:
                 update_log(attn_cache, 
                            key_states, 
@@ -79,7 +87,7 @@ class SnapKV:
                            self.p_attn, 
                            self.sink_size, 
                            self.window_size)
-                append_item_to_log("temperatures", T)
+                # append_item_to_log("temperatures", T)
             
             if self.lse_preserve_merge:
                 k_compress, v_compress = merge_fixed_budget(

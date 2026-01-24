@@ -44,7 +44,7 @@ class LLMEngine:
         
         self.scheduler.block_manager._register_method("_deallocate_block", self.model_runner.cache_mngr)
         self.scheduler.block_manager._register_obj("blocks", self.model_runner.cache_mngr)
-        self.scheduler.block_manager._register_method("update_blocks_post_compression", self.model_runner)
+        self.scheduler.block_manager._register_method("update_blocks_post_compression", self.model_runner.cache_mngr)
                 
         self.log_steps = []
         self.cur_step = 0
