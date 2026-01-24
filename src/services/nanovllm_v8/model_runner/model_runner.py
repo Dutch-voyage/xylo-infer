@@ -588,7 +588,7 @@ class ModelRunner(BaseService):
         seqs = [Sequence.for_capture([0]) for _ in range(max_bs)]
         
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = list(range(1, 32))
+        self.graph_bs = list(range(1, 52))
         # self.graph_bs = [1]
         self.graphs = {}
         self.graph_pool = None
