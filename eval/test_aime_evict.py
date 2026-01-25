@@ -38,6 +38,7 @@ class Dataset_with_template(Dataset):
 
 def generate_answer(
     local_dir="datasets",
+    eval_path="new_eval_results",
     model_path="/home/yyx/models/Qwen3-4B",
     data_source="aime24",
     enforce_eager=False,
@@ -113,7 +114,7 @@ def generate_answer(
             )
             # generated_text = outputs[0]["text"]
             with open(
-                f"eval_results/{data_source}_compress_by_{compress_method}_layer_budget_{layer_budget}_window_size_{window_size}_steps_{steps_between_cache_compressions}.txt",
+                f"{eval_path}/{data_source}_compress_by_{compress_method}_layer_budget_{layer_budget}_window_size_{window_size}_steps_{steps_between_cache_compressions}.txt",
                 "a",
             ) as f:
                 f.write(all_text)
@@ -132,7 +133,7 @@ def generate_answer(
 
     # json.dump(evaluate_result, open(f"aime_{compress_method}_{layer_budget}_{window_size}_{steps_between_cache_compressions}.json", "w"))
     with open(
-        f"eval_results/{data_source}_compress_by_{compress_method}_p_attn_{p_attn}_layer_budget_{layer_budget}_upper_{layer_upper_budget}_window_size_{window_size}_steps_{steps_between_cache_compressions}.json",
+        f"{eval_path}/{data_source}_compress_by_{compress_method}_p_attn_{p_attn}_layer_budget_{layer_budget}_upper_{layer_upper_budget}_window_size_{window_size}_steps_{steps_between_cache_compressions}.json",
         "w",
     ) as f:
         json.dump(evaluate_result, f, indent=4)
@@ -145,7 +146,7 @@ def generate_answer(
         f"Average generated tokens: {total_generate_lengths / (len(dataset))}" + "\n\n"
     )
     with open(
-        f"{data_source}_{compress_method}_{layer_budget}_{layer_upper_budget}_{window_size}_{steps_between_cache_compressions}",
+        f"{eval_path}/{data_source}_{compress_method}_{layer_budget}_{layer_upper_budget}_{window_size}_{steps_between_cache_compressions}",
         "a",
     ) as f:
         f.write(summary)
@@ -171,6 +172,7 @@ def str_to_bool(v):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_dir", type=str, default="datasets")
+    parser.add_argument("--eval_path", type=str, default="new_eval_results")
     parser.add_argument("--data_source", type=str, default="aime24")
     parser.add_argument("--model_path", type=str, default="/home/yyx/models/Qwen3-4B")
     parser.add_argument("--enforce_eager", type=str_to_bool, default=False)
@@ -189,6 +191,7 @@ def main():
 
     generate_answer(
         local_dir=args.local_dir,
+        eval_path=args.eval_path,
         data_source=args.data_source,
         model_path=args.model_path,
         enforce_eager=args.enforce_eager,

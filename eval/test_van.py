@@ -38,6 +38,7 @@ def generate_answer(
     if_log_compress=True,
     if_fake_compress=False,
     if_compress_kvcache=True,
+    if_temperatured=False,
     lse_preserve_merge=False,
     compress_method="none",
     layer_budget=512,
@@ -54,7 +55,7 @@ def generate_answer(
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     dataset = Dataset_with_template(local_dir, data_source, tokenizer)
     torch.set_warn_always(False)
-
+    
     llm = LLM(
         model_path,
         enforce_eager=enforce_eager,
@@ -62,6 +63,7 @@ def generate_answer(
         if_log_compress=if_log_compress,
         if_fake_compress=if_fake_compress,
         if_compress_kvcache=if_compress_kvcache,
+        if_temperatured=if_temperatured,
         lse_preserve_merge=lse_preserve_merge,
         compress_method=compress_method,
         layer_budget=layer_budget,
@@ -119,21 +121,22 @@ def main():
     # LLM configuration
     parser.add_argument("--enforce_eager", type=str_to_bool, default=True, help="Enforce eager execution")
     parser.add_argument("--tensor_parallel_size", type=int, default=1, help="Tensor parallel size")
-    parser.add_argument("--if_log_compress", type=str_to_bool, default=False, help="Enable compression logging")
-    parser.add_argument("--if_fake_compress", type=str_to_bool, default=False, help="Use fake compression for testing")
+    parser.add_argument("--if_log_compress", type=str_to_bool, default=True, help="Enable compression logging")
+    parser.add_argument("--if_fake_compress", type=str_to_bool, default=True, help="Use fake compression for testing")
     parser.add_argument("--if_compress_kvcache", type=str_to_bool, default=True, help="Enable KV cache compression")
+    parser.add_argument("--if_temperatured", type=str_to_bool, default=False, help="Use temperatured attention")
     parser.add_argument("--lse_preserve_merge", type=str_to_bool, default=False, help="Use LSE preserve merge method")
-    parser.add_argument("--compress_method", type=str, default="rkv", help="Compression method")
+    parser.add_argument("--compress_method", type=str, default="none", help="Compression method")
     parser.add_argument("--layer_budget", type=int, default=512, help="Layer budget for compression")
     parser.add_argument("--query_window_size", type=int, default=32, help="Query window size")
     parser.add_argument("--steps_between_cache_compressions", type=int, default=32, help="Steps between cache compressions")
-    parser.add_argument("--log_path", type=str, default="./test_logs", help="Path for log files")
-    parser.add_argument("--p_attn", type=float, default=0.99, help="Attention percentile")
-    parser.add_argument("--attn_reduce_method", type=str, default="maxpool", help="Attention reduction method")
+    parser.add_argument("--log_path", type=str, default="./test_test_logs", help="Path for log files")
+    parser.add_argument("--p_attn", type=float, default=0.90, help="Attention percentile")
+    parser.add_argument("--attn_reduce_method", type=str, default="raw", help="Attention reduction method")
 
     # Sampling parameters
     parser.add_argument("--temperature", type=float, default=-1, help="Sampling temperature (-1 for greedy)")
-    parser.add_argument("--max_tokens", type=int, default=1024, help="Maximum number of output tokens")
+    parser.add_argument("--max_tokens", type=int, default=8192, help="Maximum number of output tokens")
 
     args = parser.parse_args()
 
@@ -144,6 +147,7 @@ def main():
         tensor_parallel_size=args.tensor_parallel_size,
         if_log_compress=args.if_log_compress,
         if_fake_compress=args.if_fake_compress,
+        if_temperatured=args.if_temperatured,
         if_compress_kvcache=args.if_compress_kvcache,
         lse_preserve_merge=args.lse_preserve_merge,
         compress_method=args.compress_method,

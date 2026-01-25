@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from src.services.nanovllm_v5 import LLM, SamplingParams
+from src.services.nanovllm_v8 import LLM, SamplingParams
 from transformers import AutoTokenizer
 import os
 import datasets
@@ -38,33 +38,30 @@ class Dataset_with_template(Dataset):
 
 def generate_answer(local_dir="datasets", model_path="/home/yyx/models/Qwen3-4B"):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    # llm = LLM(model_path, 
-    #           enforce_eager=True, 
-    #           tensor_parallel_size=1, 
-    #           if_compress_kvcache=True,
-    #           if_fake_compress=False,
-    #           lse_preserve_merge=False,
-    #           compress_method="snapkv",
-    #           layer_budget=256,
-    #           #layer_upper_budget=2048, 
-    #           query_window_size=32,
-    #           p_attn=0.90,
-    #           steps_between_cache_compressions=128, 
-    #           )
+    llm = LLM(model_path, 
+              enforce_eager=False, 
+              tensor_parallel_size=1, 
+              if_compress_kvcache=True,
+              if_fake_compress=False,
+              lse_preserve_merge=False,
+              compress_method="vanilla_topp",
+              layer_budget=256,
+              layer_upper_budget=512, 
+              query_window_size=32,
+              p_attn=0.90,
+              steps_between_cache_compressions=128, 
+              )
     
-    # # sampling_params = SamplingParams(temperature=0.6 ,top_k=20, top_p=0.95, max_tokens=1024)
+    sampling_params = SamplingParams(temperature=0.6 ,top_k=20, top_p=0.95, max_tokens=2048)
+    
     # temperature < 0 for greedy_sampling
-    sampling_params = SamplingParams(temperature=-1, max_tokens=1024)
+    # sampling_params = SamplingParams(temperature=-1, max_tokens=1024)
     # model = AutoModelForCausalLM.from_pretrained(model_path).to("cuda")
 
-    dataset = Dataset_with_template(local_dir, "umathtop50", tokenizer)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
-    for batch in dataloader:
-        print(batch)
+    dataset = Dataset_with_template(local_dir, "aime24", tokenizer)
 
-    assert False
-    
-    prompts = [dataset[i]["raw_prompt"] for i in range(1)]
+    prompts = [dataset[i]["raw_prompt"] for i in range(30)]
+    # prompts = [dataset[25]["raw_prompt"]]
     
     outputs = llm.generate(prompts, sampling_params)
     input_ids_0 = tokenizer(prompts[0], return_tensors="pt").input_ids[0]
