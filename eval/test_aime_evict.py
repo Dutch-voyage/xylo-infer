@@ -40,6 +40,7 @@ def generate_answer(
     local_dir="datasets",
     model_path="/home/yyx/models/Qwen3-4B",
     data_source="aime24",
+    enforce_eager=False,
     compress_method="rkv",
     layer_budget=1024,
     layer_upper_budget=2048, 
@@ -51,7 +52,7 @@ def generate_answer(
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     llm = LLM(
         model_path,
-        enforce_eager=False,
+        enforce_eager=enforce_eager,
         tensor_parallel_size=1,
         if_compress_kvcache=True,
         compress_method=compress_method,
@@ -67,7 +68,7 @@ def generate_answer(
     )
     dataset = Dataset_with_template(local_dir, data_source, tokenizer)
 
-    batch_size = 50
+    batch_size = len(dataset)
     dataloader = DataLoader(dataset, batch_size=batch_size)
 
     total_scores = 0.0
@@ -172,8 +173,9 @@ def main():
     parser.add_argument("--local_dir", type=str, default="datasets")
     parser.add_argument("--data_source", type=str, default="aime24")
     parser.add_argument("--model_path", type=str, default="/home/yyx/models/Qwen3-4B")
+    parser.add_argument("--enforce_eager", type=str_to_bool, default=False)
     parser.add_argument(
-        "--compress_method", type=str, default="rkv", choices=["rkv", "snapkv", "vanilla_topp"]
+        "--compress_method", type=str, default="vanilla_topp", choices=["rkv", "snapkv", "vanilla_topp"]
     )
     parser.add_argument("--layer_budget", type=int, default=1024)
     parser.add_argument("--layer_upper_budget", type=int, default=2048)
@@ -189,6 +191,7 @@ def main():
         local_dir=args.local_dir,
         data_source=args.data_source,
         model_path=args.model_path,
+        enforce_eager=args.enforce_eager,
         compress_method=args.compress_method,
         layer_budget=args.layer_budget,
         layer_upper_budget=args.layer_budget * 2, 
