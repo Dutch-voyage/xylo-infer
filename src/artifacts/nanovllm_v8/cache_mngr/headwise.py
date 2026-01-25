@@ -380,6 +380,8 @@ class CacheManager(BaseService):
 
         attention_backend.register(self)
         
+        self.enforce_eager = config.enforce_eager
+        
         self.num_kv_heads = config.hf_config.num_key_value_heads 
         
         self.head_dim = config.hf_config.head_dim
@@ -692,8 +694,11 @@ class CacheManager(BaseService):
             context = get_context()
             # print(context.packed_headwise_mask.shape)
             # print(context.packed_headwise_mask[-1, :self.cu_packed_custom_mask_optimized.shape[1]])
-            context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
-            # context.packed_headwise_mask[:, :self.cu_packed_custom_mask_optimized.shape[1]].copy_(self.cu_packed_custom_mask_optimized)
+            # context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
+            if self.enforce_eager:
+                context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
+            else:
+                context.packed_headwise_mask[:, :self.cu_packed_custom_mask_optimized.shape[1]].copy_(self.cu_packed_custom_mask_optimized)
             # print(context.packed_headwise_mask[-1, :self.cu_packed_custom_mask_optimized.shape[1]])
             # print("-" * 100)
             # set_context_replace(context)

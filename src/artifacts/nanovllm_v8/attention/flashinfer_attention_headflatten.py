@@ -325,8 +325,8 @@ class Attention(nn.Module, Artifact):
     def _partial_update_indices_cudagraph(self,
                                           cu_packed_custom_mask: torch.Tensor,
                                           ):
-        # self.forward_wrapper._custom_mask_buf.copy_(cu_packed_custom_mask)
-        self.forward_wrapper._custom_mask_buf[:len(cu_packed_custom_mask)].copy_(cu_packed_custom_mask)
+        self.forward_wrapper._custom_mask_buf.copy_(cu_packed_custom_mask)
+        # self.forward_wrapper._custom_mask_buf[:len(cu_packed_custom_mask)].copy_(cu_packed_custom_mask)
     
     def _partial_update_indices(self, 
                                 cu_packed_custom_mask: torch.Tensor,

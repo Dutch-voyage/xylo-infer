@@ -116,7 +116,7 @@ class VanillaToppKV:
                 )
             else:
                 attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=self.p_attn)
-                                
+                       
                 unselected_mask_topp = (attn_topp_normed == torch.zeros_like(attn_topp_normed))
                 
                 unselected_mask_topp = unselected_mask_topp.reshape(num_kv_heads, q_cache_len, -1)
