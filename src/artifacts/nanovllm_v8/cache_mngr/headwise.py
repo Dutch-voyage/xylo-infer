@@ -492,10 +492,13 @@ class CacheManager(BaseService):
 
         seq.next_mask = seq.next_mask.to(torch.uint8)
     
-    def _rewrite_organize(self, seq: Sequence):       
+    def _rewrite_organize(self, seq: Sequence):
+        # print(seq.num_blocks_head)
         cu_num_block_head = uint8_to_bits(seq.headwise_mask_layer_transpose.to("cuda"))[:, :seq.num_blocks_max_heads].to(torch.int32).sum(dim=-1).max(0).values
-        seq.num_blocks_head = cu_num_block_head
-        
+
+        # print(cu_num_block_head)
+        # print("-" * 100)
+        seq.num_blocks_head = cu_num_block_head 
         seq.headwise_mask_layer_transpose = seq.headwise_mask_layer_transpose[..., :(seq.num_blocks_max_heads - 1) // 8 + 1].contiguous()
         seq.next_mask = ((torch.ones((self.num_kv_heads,), device="cuda", dtype=torch.uint8)) << (seq.num_blocks_max_heads % 8))
         # seq.next_mask = (torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)) << (seq.num_blocks_head % 8)
@@ -774,7 +777,8 @@ class CacheManager(BaseService):
                     seq.headwise_mask_layer_transpose[layer_id] = (seq.headwise_mask_layer_transpose[layer_id].clone().to("cuda") & ret["packed_selected_mask"])
                 else:
                     packed_selected_mask_full = torch.zeros_like(seq.headwise_mask_layer_transpose[layer_id], device="cuda")
-                    
+                    # print(uint8_to_bits(ret["packed_selected_mask"]).to("cuda").view(self.num_kv_heads, -1).sum(-1))
+                    # print("-" * 100)
                     packed_selected_mask_full[:, :ret["packed_selected_mask"].shape[-1]] = ret["packed_selected_mask"].clone()
                     seq.headwise_mask_layer_transpose[layer_id] = packed_selected_mask_full
                             

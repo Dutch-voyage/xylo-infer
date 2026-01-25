@@ -198,7 +198,7 @@ class SnapKV:
                 block_indices = self.block_indices[:max_blocks].to(selected_mask.device)
                 organized_selected_mask = block_indices.unsqueeze(0) < num_blocks_head.unsqueeze(1)
                 
-                mask_indptr = self.mask_indptr * num_blocks_max_heads
+                mask_indptr = self.mask_indptr * max_blocks
                 packed_selected_mask, _ = segment_packbits(organized_selected_mask.view(-1), mask_indptr, bitorder="little")
                 # print(packed_selected_mask)
                 packed_selected_mask = packed_selected_mask.view(8, -1)

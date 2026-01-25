@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.services.nanovllm_v8.utils.logging import append_item_to_log
+from src.artifacts.nanovllm_v8.cache_mngr.headwise import uint8_to_bits
 
 from .utils import cal_similarity, compute_attention_scores, update_log, gather_selected_kv
 from .lse_preserve_merge import merge_fixed_budget, merge_multi_to_one
@@ -224,7 +225,7 @@ class RKV:
                 value_states = torch.cat([value_sink, value_window, value_states], dim=2)
                 
                 num_blocks_head = num_selected.squeeze(0) + self.sink_size + self.window_size
-                
+                                
                 num_blocks_head = torch.minimum(num_blocks_head, torch.ones_like(num_blocks_head) * self.upper_budget)
                 
                 num_blocks_max_heads = num_blocks_head.max()
@@ -236,12 +237,10 @@ class RKV:
                 block_indices = self.block_indices[:max_blocks].to(selected_mask.device)
                 organized_selected_mask = block_indices.unsqueeze(0) < num_blocks_head.unsqueeze(1)
                 
-                mask_indptr = self.mask_indptr * num_blocks_max_heads
+                mask_indptr = self.mask_indptr * max_blocks
                 packed_selected_mask, _ = segment_packbits(organized_selected_mask.view(-1), mask_indptr, bitorder="little")
-                # print(packed_selected_mask)
-                packed_selected_mask = packed_selected_mask.view(8, -1)
                 
-                # print(packed_selected_mask.shape)
+                packed_selected_mask = packed_selected_mask.view(8, -1)
                 
                 key_states = key_states.transpose(1, 2).squeeze(0).contiguous()
                 value_states = value_states.transpose(1, 2).squeeze(0).contiguous()
