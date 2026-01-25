@@ -688,7 +688,11 @@ class CacheManager(BaseService):
             
             context = get_context()
             # print(context.packed_headwise_mask.shape)
-            context.packed_headwise_mask[:, :self.cu_packed_custom_mask_optimized.shape[1]].copy_(self.cu_packed_custom_mask_optimized)
+            # print(context.packed_headwise_mask[-1, :self.cu_packed_custom_mask_optimized.shape[1]])
+            context.packed_headwise_mask = self.cu_packed_custom_mask_optimized
+            # context.packed_headwise_mask[:, :self.cu_packed_custom_mask_optimized.shape[1]].copy_(self.cu_packed_custom_mask_optimized)
+            # print(context.packed_headwise_mask[-1, :self.cu_packed_custom_mask_optimized.shape[1]])
+            # print("-" * 100)
             # set_context_replace(context)
             
             self.log_occupied_pages(self.cu_kv_page_indices.shape[0])

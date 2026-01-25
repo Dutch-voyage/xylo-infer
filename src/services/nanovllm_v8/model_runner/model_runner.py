@@ -137,13 +137,14 @@ class ModelRunner(BaseService):
         stage = RunningStage.INFERENCE
 
         self.allocate_kv_cache()
+        init_packed_wise_mask_for_cudagraph(
+            hf_config.num_hidden_layers, 
+            config.max_num_seqs, 
+            config.max_model_len
+        )
         if not self.enforce_eager:
             set_cuda_graph_flag()
-            init_packed_wise_mask_for_cudagraph(
-                hf_config.num_hidden_layers, 
-                config.max_num_seqs, 
-                config.max_model_len
-            )
+            
             self.capture_cudagraph()
             print("cuda graph captured")
             self.cache_mngr.reset()
