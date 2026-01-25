@@ -70,7 +70,7 @@ def generate_answer(
     )
     
     dataset = Dataset_with_template(local_dir, data_source, tokenizer)    
-    batch_size = 50
+    batch_size = len(dataset)
     dataloader = DataLoader(dataset, batch_size=batch_size)    
     
     total_scores = 0.0
@@ -176,7 +176,7 @@ def main():
     parser.add_argument("--data_source", type=str, default="aime24")
     parser.add_argument("--model_path", type=str, default="/home/yyx/models/Qwen3-4B")
     parser.add_argument(
-        "--compress_method", type=str, default="rkv", choices=["rkv", "snapkv", "vanilla_topp"]
+        "--compress_method", type=str, default="rkv", choices=["rkv", "snapkv", "vanilla"]
     )
     
     parser.add_argument("--enforce_eager", type=str_to_bool, default=False)
