@@ -78,4 +78,15 @@ def set_context(
 
 def reset_context():
     global _CONTEXT
-    _CONTEXT = Context()
+    _CONTEXT.is_prefill = False
+    _CONTEXT.cu_seqlens_q = None
+    _CONTEXT.cu_seqlens_k = None
+    _CONTEXT.max_seqlen_q = 0
+    _CONTEXT.max_seqlen_k = 0
+    _CONTEXT.slot_mapping = None
+    _CONTEXT.context_lens = None
+    _CONTEXT.query_slot_mapping = None
+    _CONTEXT.query_window_pos = None
+    _CONTEXT.no_prefix = None
+    _CONTEXT.packed_headwise_mask = None
+    _CONTEXT.mask_indptr = None
