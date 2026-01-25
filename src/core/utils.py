@@ -16,7 +16,7 @@ def get_zmq_socket(
         buf_size = int(0.5 * 1024**3)
     else:
         buf_size = -1
-
+    
     socket = context.socket(socket_type)
     if endpoint.find("[") != -1:
         socket.setsockopt(zmq.IPV6, 1)

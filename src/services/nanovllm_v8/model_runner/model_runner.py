@@ -619,7 +619,7 @@ class ModelRunner(BaseService):
                 self.graph_pool = graph.pool()
             self.graphs[bs] = graph
             torch.cuda.synchronize()
-            reset_context()
+            # reset_context()
             init_packed_wise_mask_for_cudagraph(
                 hf_config.num_hidden_layers,
                 config.max_num_seqs,
