@@ -17,21 +17,28 @@ class SnapKV:
         budget=128,
         window_size=8,
         kernel_size=7,
-        record_kept_token_indices=False,
+        *args, 
+        **kwargs, 
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
         self.budget = budget
         self.sink_size = 1
         self.window_size = window_size - self.sink_size
+        self.window_size = 32
+        
         self.kernel_size = kernel_size
 
         self.lse_preserve_merge = config.lse_preserve_merge
         self.if_log_compress = config.if_log_compress
         self.p_attn = config.p_attn
         
-        # for recording kept token indices
-        self.record_kept_token_indices = record_kept_token_indices
-
+        self.num_kv_heads = config.hf_config.num_key_value_heads
+        
+        self.mask_indptr = torch.arange(0, self.num_kv_heads + 1).to("cuda")
+        self.block_indices = torch.arange(0, config.max_model_len).to("cuda")
+        
+        self.temperatures = {}
+        
     def update_kv(
         self,
         query_states,
@@ -39,7 +46,9 @@ class SnapKV:
         value_states,
         effective_kv_head_lens=None,
         effective_mask=None, 
+        seq_id=None, 
         *args, 
+        **kwargs,
     ):
         bsz, num_heads, q_cache_len, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
@@ -51,6 +60,7 @@ class SnapKV:
             }
         else:
             attn_weights = compute_attention_scores(query_states, key_states)
+            
             if effective_kv_head_lens is not None:
                 
                 indices = torch.arange(
@@ -62,10 +72,21 @@ class SnapKV:
                 effective_mask = indices < lengths.to(indices.device)
 
                 attn_weights = attn_weights.masked_fill(~effective_mask.unsqueeze(2), float("-inf"))
+                
             if effective_mask is not None:
-                attn_weights = attn_weights.masked_fill(~effective_mask.unsqueeze(2), float("-inf"))
+                effective_mask = effective_mask.unsqueeze(0).unsqueeze(2).to(key_states.device)
+                attn_weights = attn_weights.masked_fill(~effective_mask, float("-inf"))
+                
+                indices = torch.arange(kv_cache_len, device=key_states.device).unsqueeze(0).expand(bsz, -1)
+                
+                masked_indices = indices.masked_fill(~effective_mask, -1)
+                
+                _, window_indices = torch.topk(masked_indices, k=self.window_size, dim=-1)
+                
+                window_indices = window_indices.squeeze(0).squeeze(1)
 
-            raw_attn_weights = attn_weights[:, :, :, self.sink_size : -self.window_size]# .view(-1, kv_cache_len - self.window_size)
+
+            raw_attn_weights = attn_weights
             
             def transform(attn_weights):
                 transformed_attn = F.max_pool1d(
@@ -76,8 +97,20 @@ class SnapKV:
                 )
                 return transformed_attn
 
-            # attn_weights, T = binary_search_T(raw_attn_weights, self.p_attn, transform)
-            attn_weights, T = gradient_descent_T(raw_attn_weights, self.p_attn, transform)
+            if seq_id not in self.temperatures.keys():  
+                attn_weights, T = gradient_descent_T(
+                    raw_attn_weights,
+                    self.p_attn,
+                    transform,
+                )
+                self.temperatures[seq_id] = T
+            else:
+                T = self.temperatures[seq_id]
+                raw_logits = raw_attn_weights.reshape(-1, raw_attn_weights.shape[-1])
+                raw_logits /= T.unsqueeze(-1)
+                attn_weights = transform(raw_logits).view(bsz, num_kv_heads, q_cache_len, -1)
+            
+            attn_weights = attn_weights.masked_fill(~effective_mask, float("-inf"))
             
             attn_cache = (
                 nn.functional.softmax(
@@ -118,11 +151,11 @@ class SnapKV:
                 
                 selected_mask = ~unselected_mask
                 
-                selected_mask_full[:, self.sink_size : -self.window_size] = selected_mask
+                selected_mask_full = selected_mask
                 
                 # save the top budget indices
-                indices_desc_topk = attn_cache.squeeze(0).topk(self.budget - self.window_size, dim=-1).indices
-                selected_mask_full.scatter_(-1, indices_desc_topk + self.sink_size, True)
+                indices_desc_topk = attn_cache.squeeze(0).topk(self.budget - self.window_size - self.sink_size, dim=-1).indices
+                selected_mask_full.scatter_(-1, indices_desc_topk, True)
                 
                 selected_mask_full[..., :self.sink_size] = True
                 selected_mask_full[..., -self.window_size:] = True

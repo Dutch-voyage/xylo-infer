@@ -29,11 +29,12 @@ class BlockManager(BaseService):
     def name(self):
         return "BlockManager"
 
-    def __init__(self, num_blocks: int, block_size: int, num_kv_heads: int):
+    def __init__(self, num_blocks: int, block_size: int, num_kv_heads: int, if_fake_compress=True, *args, **kwargs):
         super().__init__()
         assert num_blocks > 0
         self.block_size = block_size
         self.num_kv_heads = num_kv_heads
+        self.if_fake_compress = if_fake_compress
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         # during the engine running, some block will be released head by head, when all heads are released, the block can be reused
@@ -73,7 +74,7 @@ class BlockManager(BaseService):
                 seq.headwise_mask_layer_transpose = torch.cat(
                     [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cuda", dtype=torch.uint8)], dim=2
                 )
-            seq.headwise_mask_layer_transpose[:, :, i // 8] += seq.next_mask
+            seq.headwise_mask_layer_transpose[:, :, i // 8] += seq.next_mask.to(seq.headwise_mask_layer_transpose.device)
             seq.next_mask = torch_rotl_uint8(seq.next_mask, 1)
             
     def deallocate(self, seq: Sequence):
@@ -99,8 +100,9 @@ class BlockManager(BaseService):
                 [seq.headwise_mask_layer_transpose, torch.zeros((Sequence.num_layers, Sequence.num_kv_heads, 1), device="cuda", dtype=torch.uint8)], dim=2
             )
         # print(seq.headwise_mask_layer_transpose[0])
-        # seq.headwise_mask_layer_transpose[:, torch.arange(0, self.num_kv_heads), (seq.num_blocks_head - 1) // 8] += seq.next_mask
-        # print(seq.headwise_mask_layer_transpose[0])
-        # print('-' * 100)
-        seq.headwise_mask_layer_transpose[:, torch.arange(0, self.num_kv_heads), (seq.num_blocks_max_heads - 1) // 8] += seq.next_mask
+        if self.if_fake_compress:
+            seq.headwise_mask_layer_transpose[:, torch.arange(0, self.num_kv_heads), (seq.num_blocks_head - 1) // 8] += seq.next_mask.to(seq.headwise_mask_layer_transpose.device)
+        else:
+            seq.headwise_mask_layer_transpose[:, torch.arange(0, self.num_kv_heads), (seq.num_blocks_max_heads - 1) // 8] += seq.next_mask.to(seq.headwise_mask_layer_transpose.device)
+
         seq.next_mask = torch_rotl_uint8(seq.next_mask, 1)

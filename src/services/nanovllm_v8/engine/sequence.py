@@ -8,6 +8,7 @@ import torch
 from ..sampling_params import SamplingParams
 
 def torch_rotl_uint8(x: torch.Tensor, k: int) -> torch.Tensor:
+    assert x.device.type == "cpu" 
     assert x.dtype is torch.uint8
     return ((x << k) | (x >> (8 - k))).to(torch.uint8)
 
@@ -48,7 +49,7 @@ class Sequence:
         self.num_blocks_head: torch.Tensor = torch.zeros((self.num_kv_heads, ), device="cuda", dtype=torch.int32)
         self.num_prompt_tokens: int = 0
         self.num_cached_tokens: int = 0
-        self.next_mask = torch.ones((self.num_kv_heads,), device="cuda", dtype=torch.uint8)
+        self.next_mask = torch.ones((self.num_kv_heads,), device="cpu", dtype=torch.uint8)
         self.count_to_block_id = {i: [] for i in range(self.num_kv_heads)}
         self.block_id_to_count = {}
     
@@ -81,7 +82,7 @@ class Sequence:
         seq.num_cached_tokens = 0
         
         # seq.next_mask = torch_rotl_uint8(0b00000001, seq.num_tokens)
-        seq.next_mask = torch.ones((cls.num_kv_heads,), device="cuda", dtype=torch.uint8)
+        seq.next_mask = torch.ones((cls.num_kv_heads,), device="cpu", dtype=torch.uint8)
     
         
         seq.block_table = []

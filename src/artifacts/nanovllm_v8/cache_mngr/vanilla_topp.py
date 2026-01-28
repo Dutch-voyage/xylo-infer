@@ -22,6 +22,8 @@ class VanillaToppKV:
         window_size=8,
         kernel_size=7,
         record_kept_token_indices=False,
+        *args, 
+        **kwargs,
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
         self.budget = budget
@@ -42,13 +44,14 @@ class VanillaToppKV:
         key_states,
         value_states,
         effective_kv_head_lens=None,
+        effective_mask=None,
         *args, 
+        **kwargs,
     ):
         bsz, num_heads, q_cache_len, head_dim = query_states.shape
         kv_cache_len = key_states.shape[-2]
         num_kv_heads = key_states.shape[1]
         
-
         if kv_cache_len < self.budget:
             return {
                 "key_states": key_states, 
@@ -56,25 +59,18 @@ class VanillaToppKV:
             }
         else:
             attn_weights = compute_attention_scores(query_states, key_states)
-            if effective_kv_head_lens is not None:
-                # 1. Create a sequence tensor: [0, 1, ..., kv_cache_len-1] on the correct device
-                # Shape: (1, 1, kv_cache_len)
-                indices = torch.arange(
-                    kv_cache_len, device=key_states.device
-                ).view(1, 1, -1)
-
-                # 2. Reshape lengths for broadcasting
-                # Shape: (bsz, num_heads, 1)
-                lengths = effective_kv_head_lens.unsqueeze(-1)
-
-                # 3. Create the mask in one go using broadcasting
-                # Result Shape: (bsz, num_heads, kv_cache_len)
-                # True where index < length (valid), False where index >= length (padding)
-                effective_mask = indices < lengths.to(indices.device)
-                # 4. Apply the mask
-                # We invert the mask (~) because masked_fill fills where the condition is True.
-                # We unsqueeze dim 2 to match attn_weights shape (bsz, num_heads, q_len, kv_len)
-                attn_weights = attn_weights.masked_fill(~effective_mask.unsqueeze(2), float("-inf"))
+            
+            if effective_mask is not None:
+                effective_mask = effective_mask.unsqueeze(0).unsqueeze(2).to(key_states.device)
+                attn_weights = attn_weights.masked_fill(~effective_mask, float("-inf"))
+                
+                indices = torch.arange(kv_cache_len, device=key_states.device).unsqueeze(0).expand(bsz, -1)
+                
+                masked_indices = indices.masked_fill(~effective_mask, -1)
+                
+                _, window_indices = torch.topk(masked_indices, k=self.window_size, dim=-1)
+                
+                window_indices = window_indices.squeeze(0).squeeze(1)
                         
             # raw_attn_weights = attn_weights[:, :, :, self.sink_size : -self.window_size]# .view(-1, kv_cache_len - self.window_size)
                         
@@ -84,6 +80,7 @@ class VanillaToppKV:
                     dim=-1,
                     dtype=torch.float32,
                 )
+                .mean(-2)
                 .to(query_states.dtype)
             ) 
             
@@ -96,28 +93,26 @@ class VanillaToppKV:
             #                self.sink_size, 
             #                self.window_size)
             
-            # if self.lse_preserve_merge:
-            #     k_compress, v_compress = merge_fixed_budget(
-            #         attn_cache,
-            #         raw_attn_weights.softmax(dim=-1).mean(-2), 
-            #         self.budget - self.window_size - self.sink_size,
-            #         key_states[:, :, self.sink_size : -self.window_size, :],
-            #         value_states[:, :, self.sink_size : -self.window_size, :],
-            #     )
-            # else:
+            # selected_mask = torch.zeros_like(attn_cache)
+            
             attn_topp_normed = top_p_renorm_probs(attn_cache.view(-1, attn_cache.shape[-1]), top_p=self.p_attn)
 
-            selected_indices = torch.vmap(partial(torch.nonzero_static, size=attn_cache.shape[-1]), in_dims=(0,))(attn_topp_normed).squeeze(-1)
+            # selected_indices = torch.vmap(partial(torch.nonzero_static, size=attn_cache.shape[-1]), in_dims=(0,))(attn_topp_normed).squeeze(-1)
             
-            selected_mask = torch.zeros_like(attn_cache, dtype=torch.bool).squeeze(0) # bsz = 1 in the current implementation
+            # selected_mask = torch.zeros_like(attn_cache, dtype=torch.bool).squeeze(0) # bsz = 1 in the current implementation
+            
+            selected_mask = attn_topp_normed > torch.zeros_like(attn_topp_normed)
             
             # selected_mask[:] = True
+            
+            indices_desc_topk = attn_cache.squeeze(0).topk(self.budget - self.window_size - self.sink_size, dim=-1).indices
+            selected_mask.scatter_(-1, indices_desc_topk, True)
             
             selected_mask[..., :self.sink_size] = True
             
             selected_mask[..., -self.window_size:] = True
             
-            scatter_with_mask(torch.ones_like(selected_indices, dtype=torch.bool), selected_indices, selected_mask)
+            # scatter_with_mask(torch.ones_like(selected_indices, dtype=torch.bool), selected_indices, selected_mask)
             
             mask_indptr = torch.arange(0, num_kv_heads + 1).to(selected_mask.device) * kv_cache_len
                         

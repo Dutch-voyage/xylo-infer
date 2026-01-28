@@ -26,10 +26,9 @@ from src.artifacts.nanovllm_v8.cache_mngr.headwise import CacheManager
 # from src.artifacts.nanovllm_v8.cache_mngr.layerwise import CacheManager
 from src.artifacts.nanovllm_v8.cache_mngr.nocompress import NoCompress
 # from src.artifacts.nanovllm_v8.cache_mngr.snapKV import SnapKV
-from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised_topp_rewrite import SnapKV
+
 # from src.artifacts.nanovllm_v8.cache_mngr.RKV import RKV
 # from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_v2 import RKV
-from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_topp_rewrite import RKV
 
 from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp_rewrite import VanillaToppKV
 
@@ -92,12 +91,24 @@ class ModelRunner(BaseService):
         if self.config.compress_method == "none":
             self.compressor = NoCompress(config, window_size=config.query_window_size, budget=config.layer_budget)
         elif self.config.compress_method == "rkv":
+            if self.config.compress_method:
+                from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_topp import RKV
+            else:
+                from src.artifacts.nanovllm_v8.cache_mngr.RKV_revised_topp_rewrite import RKV
             self.compressor = RKV(config, window_size=config.query_window_size, budget=config.layer_budget, upper_budget=config.layer_upper_budget)
         elif self.config.compress_method == "snapkv":
+            if self.config.if_fake_compress:
+                from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised_topp import SnapKV
+            else:
+                from src.artifacts.nanovllm_v8.cache_mngr.snapKV_revised_topp_rewrite import SnapKV
             self.compressor = SnapKV(config, window_size=config.query_window_size, budget=config.layer_budget, upper_budget=config.layer_upper_budget)
         elif self.config.compress_method == "vanilla_topp": 
+            if self.config.if_fake_compress:
+                from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp import VanillaToppKV
+            else:
+                from src.artifacts.nanovllm_v8.cache_mngr.vanilla_topp_rewrite import VanillaToppKV
             self.compressor = VanillaToppKV(
-                config, window_size=config.query_window_size, budget=config.layer_budget
+                config, window_size=config.query_window_size, budget=config.layer_budget, upper_budget=config.layer_upper_budget
             )
         elif self.config.compress_method == "oMerge_filter":
             self.compressor = OrthMergingFilter(

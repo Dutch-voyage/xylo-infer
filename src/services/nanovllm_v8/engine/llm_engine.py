@@ -93,6 +93,8 @@ class LLMEngine:
         log_steps: list[int] | None = None, 
         use_tqdm: bool = True,
     ) -> list[str]:
+        record_step = 10240
+        record_throughput = None
         if use_tqdm:
             pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True)
         if not isinstance(sampling_params, list):
@@ -118,6 +120,8 @@ class LLMEngine:
             for seq_id, token_ids, logits in output:
                 outputs[seq_id] = (token_ids, logits)
             pbar.update(1)
+            if pbar.n == record_step:
+                record_throughput = int(decode_throughput)
         self.model_runner.call("save_num_blocks")
         if self.config.if_log_compress:
             self.model_runner.call("save_lse_log")
@@ -127,7 +131,7 @@ class LLMEngine:
         
         self.log_collector.save(self.config.log_path)
         outputs = [outputs[seq_id] for seq_id in sorted(outputs)]
-        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids, "logits": logits} for token_ids, logits in outputs]
+        outputs = [{"text": self.tokenizer.decode(token_ids), "record_throughput": record_throughput, "token_ids": token_ids, "logits": logits} for token_ids, logits in outputs]
         if use_tqdm:
             pbar.close()
         return outputs

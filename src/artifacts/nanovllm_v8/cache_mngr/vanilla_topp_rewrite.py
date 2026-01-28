@@ -72,6 +72,7 @@ class VanillaToppKV:
                 effective_mask = indices < lengths.to(indices.device)
 
                 attn_weights = attn_weights.masked_fill(~effective_mask.unsqueeze(2), float("-inf"))
+                
             if effective_mask is not None:
                 effective_mask = effective_mask.unsqueeze(0).unsqueeze(2).to(key_states.device)
                 attn_weights = attn_weights.masked_fill(~effective_mask, float("-inf"))

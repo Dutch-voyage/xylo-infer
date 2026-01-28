@@ -488,7 +488,7 @@ def compute_attention_scores(query_states, key_states, pooling="max"):
 
     return attn_weights
 
-
+@torch.no_grad()
 def cal_similarity(
     key_cache,
     threshold=0.5,
@@ -502,7 +502,7 @@ def cal_similarity(
     num_heads = k.shape[0]
 
     k_norm = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
-    similarity_cos = torch.matmul(k_norm, k_norm.transpose(-1, -2))
+    similarity_cos = torch.matmul(k_norm, k_norm.transpose(-1, -2)).detach()
 
     for h in range(num_heads):
         similarity_cos[h].fill_diagonal_(0.0)
