@@ -31,6 +31,8 @@ class CacheManager(BaseService):
         attention_backend.register(self)
 
         self.num_layers = config.hf_config.num_hidden_layers
+        
+        self.layer_budget = config.layer_budget
 
         self.seq_to_layer_block_table = {}
         
@@ -190,3 +192,6 @@ class CacheManager(BaseService):
                 v_cache=v_cache,
                 slot_mapping=slot_mappings_tensor,
             )
+
+        
+            self.update_blocks_post_compression(seq, self.layer_budget)

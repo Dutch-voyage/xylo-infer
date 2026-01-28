@@ -225,9 +225,6 @@ class ModelRunner(BaseService):
         if self.config.if_fake_compress:
             return 
         
-        for seq in self.cu_seqs:    
-            self.update_blocks_post_compression(seq, self.config.layer_budget)
-
     def save_compress_distribution(self, steps):
         save_path = os.path.join(self.config.log_path, f"compress_distribution_{steps}.pt")
         if not os.path.exists(self.config.log_path):
